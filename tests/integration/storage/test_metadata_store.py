@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 
@@ -74,6 +75,33 @@ def test_update_on_unknown_file_id_raises_instead_of_orphaning_tags(store: Metad
 
     with pytest.raises(sqlite3.IntegrityError):
         store.update(ghost)
+
+
+def test_concurrent_inserts_from_multiple_threads_all_persist_correctly(store: MetadataStore):
+    thread_count = 20
+    records = [
+        FileRecord.new(name=f"file-{i}.txt", content_hash=f"h{i}", tags={f"tag-{i}", "shared"})
+        for i in range(thread_count)
+    ]
+    errors: list[BaseException] = []
+
+    def _insert(record: FileRecord) -> None:
+        try:
+            store.insert(record)
+        except BaseException as exc:  # noqa: BLE001 - capture for assertion in main thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_insert, args=(record,)) for record in records]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    for i, record in enumerate(records):
+        fetched = store.get(record.file_id)
+        assert fetched is not None
+        assert fetched.tags == {f"tag-{i}", "shared"}
 
 
 def test_list_live_excludes_tombstoned_records(store: MetadataStore):

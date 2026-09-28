@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -45,9 +46,10 @@ class MetadataStore:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._lock = threading.Lock()
 
     def insert(self, record: FileRecord) -> None:
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO files
@@ -67,17 +69,18 @@ class MetadataStore:
             self._insert_tags(record.file_id, record.tags)
 
     def get(self, file_id: uuid.UUID) -> FileRecord | None:
-        row = self._conn.execute(
-            "SELECT file_id, name, content_hash, tombstone, tombstone_at, created_at, updated_at "
-            "FROM files WHERE file_id = ?",
-            (str(file_id),),
-        ).fetchone()
-        if row is None:
-            return None
-        return self._row_to_record(row)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT file_id, name, content_hash, tombstone, tombstone_at, created_at, updated_at "
+                "FROM files WHERE file_id = ?",
+                (str(file_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_record(row)
 
     def update(self, record: FileRecord) -> None:
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute(
                 """
                 UPDATE files
@@ -99,11 +102,12 @@ class MetadataStore:
             self._insert_tags(record.file_id, record.tags)
 
     def list_live(self) -> list[FileRecord]:
-        rows = self._conn.execute(
-            "SELECT file_id, name, content_hash, tombstone, tombstone_at, created_at, updated_at "
-            "FROM files WHERE tombstone = 0"
-        ).fetchall()
-        return [self._row_to_record(row) for row in rows]
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT file_id, name, content_hash, tombstone, tombstone_at, created_at, updated_at "
+                "FROM files WHERE tombstone = 0"
+            ).fetchall()
+            return [self._row_to_record(row) for row in rows]
 
     def _insert_tags(self, file_id: uuid.UUID, tags: set[str]) -> None:
         self._conn.executemany(
