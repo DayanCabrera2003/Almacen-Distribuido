@@ -1,3 +1,4 @@
+import sqlite3
 import uuid
 from pathlib import Path
 
@@ -66,6 +67,13 @@ def test_data_survives_reopening_the_same_db_file(tmp_path: Path):
     fetched = reopened.get(record.file_id)
     assert fetched is not None
     assert fetched.tags == {"x"}
+
+
+def test_update_on_unknown_file_id_raises_instead_of_orphaning_tags(store: MetadataStore):
+    ghost = FileRecord.new(name="ghost.txt", content_hash="h1", tags={"orphan"})
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.update(ghost)
 
 
 def test_list_live_excludes_tombstoned_records(store: MetadataStore):
