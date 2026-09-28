@@ -1270,6 +1270,19 @@ def test_list_excludes_deleted_files(client: TestClient):
 def test_list_rejects_invalid_mode(client: TestClient):
     response = client.get("/files", params={"tags": "x", "mode": "xor"})
     assert response.status_code == 400
+
+
+def test_list_ignores_invalid_mode_when_no_tags_given(client: TestClient):
+    client.post(
+        "/files",
+        files={"file": ("a.txt", b"a", "text/plain")},
+        data={"name": "a.txt"},
+    )
+
+    response = client.get("/files", params={"mode": "xor"})
+
+    assert response.status_code == 200
+    assert [f["name"] for f in response.json()] == ["a.txt"]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1293,9 +1306,9 @@ from almacen.api.deps import get_tag_index
 from almacen.storage.tag_index import TagIndex
 ```
 
-Then add the endpoint (order matters: FastAPI needs `""` registered — it does
-not conflict with `"/{file_id}"` since they're different path shapes, but keep
-this defined before `download_file` for readability):
+Then add the endpoint. Route order does not matter here — `""` (list) and
+`"/{file_id}"` (download) are different path shapes with no ambiguity — but for
+readability, place it before `download_file`:
 
 ```python
 @router.get("", response_model=list[FileMetadata])
@@ -1304,9 +1317,12 @@ def list_files(
     mode: str = "and",
     tag_index: TagIndex = Depends(get_tag_index),
 ) -> list[FileMetadata]:
-    if mode not in ("and", "or"):
-        raise HTTPException(status_code=400, detail="mode must be 'and' or 'or'")
     tag_list = list(_parse_tags(tags)) if tags else None
+    # mode only applies when tags are given (per the "no tags = ignore mode"
+    # decision above) — validate it here, not unconditionally, so a tags-less
+    # request with a bogus `mode` still succeeds.
+    if tag_list and mode not in ("and", "or"):
+        raise HTTPException(status_code=400, detail="mode must be 'and' or 'or'")
     records = tag_index.query(tag_list, mode=mode)  # type: ignore[arg-type]
     return [to_file_metadata(r) for r in records]
 ```
@@ -1314,7 +1330,7 @@ def list_files(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/integration/api/test_files_lifecycle.py -v`
-Expected: 9 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1459,7 +1475,7 @@ from almacen.api.routers import tags as tags_router
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `pytest tests/integration/api/test_files_lifecycle.py -v`
-Expected: 12 passed
+Expected: 13 passed
 
 - [ ] **Step 6: Commit**
 
@@ -1478,10 +1494,10 @@ git commit -m "Add tags router: list, add, remove"
 - [ ] **Step 1: Run the entire test suite**
 
 Run: `pytest -v`
-Expected: all tests across `tests/unit/` and `tests/integration/` pass (28 tests:
-7 domain + 5 blob_store + 6 metadata_store + 4 tag_index + 12 files/tags API — the
-API file accumulated tests across Tasks 9-11, but a couple of shared-fixture
-assertions may bring the exact count off by one or two; the point is 0 failures).
+Expected: all tests across `tests/unit/` and `tests/integration/` pass (35 tests:
+7 domain + 5 blob_store + 6 metadata_store + 4 tag_index + 13 files/tags API — the
+API file accumulated tests across Tasks 9-11; the exact count matters less than
+0 failures).
 
 - [ ] **Step 2: Write `README.md`**
 
