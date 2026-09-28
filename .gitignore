@@ -1,0 +1,25 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+*.log
+
+# Dependencies / build artifacts
+node_modules/
+dist/
+build/
+target/
+__pycache__/
+*.pyc
+venv/
+.venv/
