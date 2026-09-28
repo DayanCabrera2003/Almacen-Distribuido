@@ -1,7 +1,7 @@
 # Tag-Based Distributed File Store — Design Spec
 
 **Date:** 2026-09-28
-**Status:** Approved by user, pending spec review
+**Status:** Approved by user and spec review
 
 ## 1. Objective
 
