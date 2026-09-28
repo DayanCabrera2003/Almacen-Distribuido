@@ -95,9 +95,24 @@ FileRecord {
   content_hash: str       # SHA-256, LWW-register
   tags: OR-Set<str>       # CRDT — conflict-free add/remove
   vector_clock: {node_id: counter}
-  tombstone: bool + timestamp
+  tombstone: bool          # LWW-register (timestamp, node_id) — see below
 }
 ```
+
+**Tombstone merge rule:** `tombstone` is itself an LWW-register, merged the same
+way as `name` and `content_hash` (§9): each node's current `tombstone` value
+carries its own `(timestamp, node_id)`, and on merge the higher timestamp wins.
+A `FileRecord` starts with `tombstone=(false, created_at, creating_node_id)`;
+`DELETE` is the only operation that ever writes to this field, setting it to
+`(true, delete_time, deleting_node_id)`. Because there is no "undelete" API, a
+delete's timestamp is always later than the field's prior (untouched) value, so
+in practice this LWW rule is equivalent to "delete is monotonic": a concurrent
+delete on one node always outlasts a concurrent non-delete edit (rename, tag
+change) to the same record on another node, since that edit never writes to the
+`tombstone` field and so cannot produce a competing timestamp for it. The other
+fields' own LWW/OR-Set values from the concurrent edit still merge normally and
+remain in the stored record — they are just not visible through the API once
+`tombstone=true` (§10).
 
 **Vector clock semantics:** `vector_clock` is a single clock per `FileRecord`
 (not per field). Every local mutation to the record on a given node — rename,
@@ -149,6 +164,9 @@ merging two copies of the same `file_id` from different nodes:
   by higher node_id). The vector clock distinguishes a genuinely concurrent
   conflict from a causally stale update; genuine conflicts are logged as
   LWW-resolved conflicts (visible for debugging/demo), never silently dropped.
+- **Tombstone (delete vs. concurrent edit):** `tombstone` is a third LWW-register
+  field, resolved the same way — see the "Tombstone merge rule" in §6 for the
+  exact rule and why it behaves as delete-always-wins in practice.
 
 ## 10. Deletion semantics and blob garbage collection
 
@@ -160,7 +178,9 @@ merging two copies of the same `file_id` from different nodes:
    just listings/tag queries, but also a direct `GET /files/{file_id}` or
    `GET /files/{file_id}/tags`, which return 404 exactly as if the file_id were
    unknown. There is no "hidden from search but still directly fetchable"
-   window.
+   window. The same applies to every mutating endpoint on that `file_id`
+   (`PATCH`, `POST .../tags`, `DELETE .../tags/{tag}`) — all return 404, not a
+   silent no-op.
 2. The tombstone propagates via gossip/anti-entropy like any other metadata
    change. Until it reaches a given node, that node still serves the file
    normally — this propagation delay is the expected, bounded inconsistency
@@ -192,6 +212,12 @@ node:
   partitioned may hold a stale `FileRecord` pointing at this blob and will need
   it once anti-entropy catches that peer up — deleting immediately on the first
   node to drop its reference would break that peer's read.
+- For the tombstone-purge path specifically, this means a blob's total retention
+  after the original delete is roughly **two grace TTLs**, not one: one TTL for
+  the `FileRecord` itself to become purge-eligible (step 3 above), plus another
+  TTL after the blob becomes reference-count-zero before it is physically
+  deleted. This stacking is intentional — it errs toward over-retention rather
+  than under-retention — not an oversight.
 
 **TTL in the demo:** the grace TTL is a `config.py` setting, not hardcoded. The
 default (24h) is the production-realistic value; the Docker Compose demo
