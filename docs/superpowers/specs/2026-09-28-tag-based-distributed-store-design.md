@@ -33,9 +33,9 @@ reconcile divergence afterward, which contradicts the requirement.
 
 - **Metadata** (file records: name, content pointer, tags): eventually
   consistent, fully replicated to every node, merged via CRDTs.
-- **Content**: durable via synchronous replication to a subset (R) of nodes at
-  write time, with asynchronous anti-entropy catching up any replica that missed
-  the write (e.g. because it was partitioned).
+- **Content**: durable via a W-of-R write quorum against a replica set of size R
+  (see §8 for the exact mechanism), with asynchronous anti-entropy catching up
+  any replica that missed the write (e.g. because it was partitioned).
 
 ## 4. Topology
 
@@ -99,6 +99,23 @@ FileRecord {
 }
 ```
 
+**Vector clock semantics:** `vector_clock` is a single clock per `FileRecord`
+(not per field). Every local mutation to the record on a given node — rename,
+content update, tag add, tag remove, delete — increments that node's own
+component, `vector_clock[node_id] += 1`, and the resulting value is the one used
+everywhere a "counter" is needed for that mutation (including as the `counter` in
+an OR-Set tag element, §9 — there is only one counter source, not two). When
+merging two copies of the same `file_id` from different nodes:
+
+- If one record's vector clock dominates the other's (≥ in every component, >
+  in at least one), it is causally newer: its LWW field values are taken as-is,
+  no conflict.
+- If neither dominates (concurrent), it is a genuine conflict for the LWW fields
+  (name, content_hash), resolved as described in §9. Tags never need this
+  distinction — the OR-Set merge rule (union of adds minus observed removes) is
+  correct regardless of causality.
+- The merged record's vector clock is the component-wise max of both inputs.
+
 ## 7. Storage layer (per node, local)
 
 - **Blobs**: flat filesystem, `blobs/<sha256>` (same pattern as Git objects).
@@ -133,22 +150,53 @@ FileRecord {
   conflict from a causally stale update; genuine conflicts are logged as
   LWW-resolved conflicts (visible for debugging/demo), never silently dropped.
 
-## 10. Deletion semantics
+## 10. Deletion semantics and blob garbage collection
+
+**Deletion (`FileRecord` lifecycle):**
 
 1. `DELETE` sets `tombstone=true` with a timestamp on the `FileRecord`; nothing
-   is physically deleted yet. The file disappears from listings/queries
-   immediately on the node that processed the delete.
+   is physically deleted yet. Once tombstoned, the file is inaccessible via
+   **every** API path immediately on the node that processed the delete — not
+   just listings/tag queries, but also a direct `GET /files/{file_id}` or
+   `GET /files/{file_id}/tags`, which return 404 exactly as if the file_id were
+   unknown. There is no "hidden from search but still directly fetchable"
+   window.
 2. The tombstone propagates via gossip/anti-entropy like any other metadata
-   change.
-3. After a configurable **grace TTL** (default: 24 simulated hours) from when
-   the tombstone originated, a local GC process purges the `FileRecord`
-   permanently and, via **reference counting** over `content_hash` (multiple
-   `file_id`s can point at the same deduplicated blob), deletes the physical
-   blob only if no other file still references it.
+   change. Until it reaches a given node, that node still serves the file
+   normally — this propagation delay is the expected, bounded inconsistency
+   window inherent to the AP model (§3), not a special case.
+3. After a configurable **grace TTL** (default: 24h, but see "TTL in the demo"
+   below) from when the tombstone originated, a local GC process purges the
+   `FileRecord` permanently.
 4. The grace TTL exists to give the tombstone time to reach nodes that were
    partitioned when the delete happened — preventing an isolated node from
    "resurrecting" a deleted file via anti-entropy with stale data after it
    reconnects.
+
+**Blob garbage collection (reference counting):** a physical blob (`content_hash`)
+can be orphaned two ways, not just one: (a) its owning `FileRecord` is tombstoned
+and purged (step 3 above), or (b) a `PATCH` repoints a still-live `FileRecord`'s
+`content_hash` to new content, dropping its reference to the old blob. Both cases
+are handled by the same generic mechanism, run by the local GC process on every
+node:
+
+- For each blob in the local `blob_store`, the count of *local* `FileRecord`s
+  (tombstoned-and-purged records don't count; live records pointing elsewhere
+  don't count) currently referencing that `content_hash` is checked periodically.
+- The instant a blob's local reference count drops to zero, it becomes a **GC
+  candidate** with a recorded "became unreferenced at" timestamp — it is not
+  deleted yet.
+- Only after the same grace TTL has elapsed since a blob became a candidate, and
+  its reference count is still zero at that point, is it physically deleted.
+- The TTL here serves the same purpose as for tombstones: a peer that is still
+  partitioned may hold a stale `FileRecord` pointing at this blob and will need
+  it once anti-entropy catches that peer up — deleting immediately on the first
+  node to drop its reference would break that peer's read.
+
+**TTL in the demo:** the grace TTL is a `config.py` setting, not hardcoded. The
+default (24h) is the production-realistic value; the Docker Compose demo
+overrides it to a short duration (e.g. minutes) so tombstone purge, blob GC, and
+post-partition reconciliation are all observable within a live demo session.
 
 ## 11. Reconciliation after partitions (anti-entropy)
 
@@ -172,7 +220,7 @@ FileRecord {
 ```
 POST   /files                      # upload: multipart content + name + tags[]
 GET    /files/{file_id}            # download content
-PATCH  /files/{file_id}            # update name and/or content (new version)
+PATCH  /files/{file_id}            # update name and/or content pointer
 DELETE /files/{file_id}            # tombstone
 GET    /files/{file_id}/tags       # list tags for a file
 POST   /files/{file_id}/tags       # add tag(s)
@@ -239,7 +287,7 @@ almacen/
     placement.py               # rendezvous hashing (HRW)
     replication_client.py      # orchestrates W/R quorum for blob read/write
     reconciliation.py          # push-pull anti-entropy, FileRecord merge
-    gc.py                      # purge of expired tombstones
+    gc.py                      # purge of expired tombstones and orphaned blobs
   config.py                    # node settings (port, peers, N/R/W, TTLs)
   main.py                      # bootstrap: starts FastAPI + gRPC + gossip loop
 docker/
@@ -293,7 +341,8 @@ Each phase is independently demoable and gets its own plan later (via
    push-pull anti-entropy, partition injection in Compose, demo of
    post-partition reconciliation.
 5. **Deletion and GC** — tombstones, grace TTL, reference counting, orphaned
-   blob purge.
+   blob purge (covering both tombstone-purge orphans and `PATCH`-repoint
+   orphans, §10).
 6. **Polish** — `/cluster/status`, structlog, Typer CLI, chaos tests, final
    documentation including the CephFS/IPFS comparison (§15).
 
@@ -306,3 +355,7 @@ Each phase is independently demoable and gets its own plan later (via
 - Sibling-version exposure for conflicting writes (Dynamo-style multi-version
   reads) — conflicts are resolved via LWW instead, with conflicts logged rather
   than surfaced to the client, to keep the client-facing API simple.
+- Version history: `PATCH` replaces a file's current content pointer, it does
+  not create a retrievable past version. `GET /files/{file_id}` only ever
+  returns the current content; there is no API to fetch a prior version of a
+  file's content.
