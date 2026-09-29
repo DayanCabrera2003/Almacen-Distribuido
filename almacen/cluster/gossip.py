@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 
 import grpc
 
 from almacen.cluster.channels import ChannelPool
 from almacen.cluster.membership import Membership
+from almacen.cluster.placement import replica_set
 from almacen.cluster.reconciliation import build_digest
+from almacen.cluster.replication_client import ReplicationClient
 from almacen.config import Peer, Settings
 from almacen.rpc import cluster_pb2 as pb
 from almacen.rpc import cluster_pb2_grpc as pb_grpc
@@ -20,6 +23,7 @@ from almacen.rpc.gossip_codec import (
     encode_membership,
 )
 from almacen.rpc.record_codec import message_to_record, record_to_message
+from almacen.storage.blob_store import BlobStore
 from almacen.storage.metadata_store import MetadataStore
 
 logger = logging.getLogger(__name__)
@@ -81,3 +85,43 @@ def gossip_once(
         return False
 
     return True
+
+
+def catch_up_blobs(
+    *,
+    settings: Settings,
+    store: MetadataStore,
+    blob_store: BlobStore,
+    replication_client: ReplicationClient,
+    budget: int,
+    should_stop: Callable[[], bool] = lambda: False,
+) -> int:
+    """Fetch up to `budget` blobs this node should hold but does not.
+
+    Driven by placement, not by "fetch whatever I am missing": a node pulls only
+    the content rendezvous hashing makes it a replica for. Fetching everything
+    would make every node store the whole corpus and quietly undo the sharding.
+
+    Bounded on purpose. This runs on the gossip thread and each fetch is a
+    blocking transfer, so a node healing from a long partition could otherwise
+    spend minutes inside a single tick — which is what would actually defeat
+    the loop's shutdown join. Whatever is left over is picked up next tick:
+    anti-entropy is a loop, not a one-shot.
+    """
+    fetched = 0
+    for record in store.list_live():
+        if fetched >= budget or should_stop():
+            break
+        replicas = replica_set(
+            record.content_hash, settings.node_ids, settings.replication_factor
+        )
+        if settings.node_id not in replicas:
+            continue
+        if blob_store.exists(record.content_hash):
+            continue
+        content = replication_client.get_blob(record.content_hash)
+        if content is not None:
+            blob_store.put(content)
+            fetched += 1
+            logger.info("caught up blob %s", record.content_hash[:12])
+    return fetched
