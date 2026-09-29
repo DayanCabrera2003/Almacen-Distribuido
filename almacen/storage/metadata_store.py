@@ -101,6 +101,40 @@ class MetadataStore:
             )
             self._insert_tags(record.file_id, record.tags)
 
+    def upsert(self, record: FileRecord) -> None:
+        """Insert the record, or replace it wholesale if it already exists.
+
+        Used when applying a record replicated from another node, where this node
+        may or may not already know the file.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO files
+                    (file_id, name, content_hash, tombstone, tombstone_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(file_id) DO UPDATE SET
+                    name = excluded.name,
+                    content_hash = excluded.content_hash,
+                    tombstone = excluded.tombstone,
+                    tombstone_at = excluded.tombstone_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(record.file_id),
+                    record.name,
+                    record.content_hash,
+                    int(record.tombstone),
+                    _dt_to_str(record.tombstone_at),
+                    _dt_to_str(record.created_at),
+                    _dt_to_str(record.updated_at),
+                ),
+            )
+            self._conn.execute(
+                "DELETE FROM file_tags WHERE file_id = ?", (str(record.file_id),)
+            )
+            self._insert_tags(record.file_id, record.tags)
+
     def list_live(self) -> list[FileRecord]:
         with self._lock:
             rows = self._conn.execute(

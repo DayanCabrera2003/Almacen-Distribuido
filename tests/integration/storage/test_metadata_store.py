@@ -114,3 +114,55 @@ def test_list_live_excludes_tombstoned_records(store: MetadataStore):
     results = store.list_live()
 
     assert {r.file_id for r in results} == {live.file_id}
+
+
+def test_upsert_inserts_a_record_the_store_has_never_seen(tmp_path: Path):
+    store = MetadataStore(tmp_path / "m.db")
+    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+
+    store.upsert(record)
+
+    stored = store.get(record.file_id)
+    assert stored is not None
+    assert stored.name == "a.txt"
+    assert stored.tags == {"x"}
+
+
+def test_upsert_overwrites_an_existing_record(tmp_path: Path):
+    store = MetadataStore(tmp_path / "m.db")
+    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+    store.insert(record)
+
+    record.rename("b.txt")
+    record.add_tag("y")
+    record.remove_tag("x")
+    store.upsert(record)
+
+    stored = store.get(record.file_id)
+    assert stored is not None
+    assert stored.name == "b.txt"
+    assert stored.tags == {"y"}
+
+
+def test_upsert_is_idempotent(tmp_path: Path):
+    store = MetadataStore(tmp_path / "m.db")
+    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x", "y"})
+
+    store.upsert(record)
+    store.upsert(record)
+
+    assert len(store.list_live()) == 1
+    stored = store.get(record.file_id)
+    assert stored is not None and stored.tags == {"x", "y"}
+
+
+def test_upsert_preserves_a_tombstone(tmp_path: Path):
+    store = MetadataStore(tmp_path / "m.db")
+    record = FileRecord.new(name="a.txt", content_hash="h1")
+    record.mark_deleted()
+
+    store.upsert(record)
+
+    stored = store.get(record.file_id)
+    assert stored is not None and stored.tombstone is True
+    assert store.list_live() == []
