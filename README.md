@@ -40,8 +40,10 @@ Each node reads its configuration from the environment:
 | `ALMACEN_REPLICATION_FACTOR` | `3` | R — replicas per blob |
 | `ALMACEN_WRITE_QUORUM` | `2` | W — replicas that must confirm a write |
 
-With `ALMACEN_PEERS` unset the node is a one-node cluster and R and W collapse to
-1, which is how local development and most of the test suite run.
+With `ALMACEN_PEERS` unset the node is a one-node cluster: the replica set for
+any blob is that single node, and the acknowledgements required shrink to match
+(`min(W, replicas)` = 1). `ALMACEN_REPLICATION_FACTOR` itself keeps its
+configured value. This is how local development and most of the test suite run.
 
 ## Run a five-node cluster
 

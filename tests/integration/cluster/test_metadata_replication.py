@@ -112,3 +112,36 @@ def test_reads_are_served_locally(three_nodes):
 
     assert replicated.get(record.file_id) is not None
     assert len(replicated.list_live()) == 1
+
+
+def test_an_inbound_replicated_record_is_not_pushed_back_out(three_nodes, tmp_path):
+    """Applying a peer's record must not re-broadcast it.
+
+    The servicers are wired with the plain local store, never the replicating
+    wrapper. If that wiring were reversed, every write would amplify around the
+    cluster (4 -> 16 -> 64 pushes) and, because every push is best-effort and
+    swallowed, no assertion elsewhere in the suite would notice.
+    """
+    from almacen.rpc.cluster_servicer import ClusterServicer
+    from almacen.rpc.record_codec import record_to_message
+
+    _, stores, _ = three_nodes
+    pushes: list[str] = []
+
+    class RecordingReplicator:
+        def replicate(self, record) -> None:
+            pushes.append(str(record.file_id))
+
+    # A node whose local store would replicate if anything asked it to.
+    replicating = ReplicatedMetadataStore(stores[1], RecordingReplicator())
+    servicer = ClusterServicer(stores[1], node_id="node2")
+
+    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+    servicer.ReplicateRecord(record_to_message(record), context=None)
+
+    assert stores[1].get(record.file_id) is not None, "the record was applied locally"
+    assert pushes == [], "applying a peer's record must not trigger an outbound push"
+
+    # And the wrapper is what would have pushed, proving the recorder works.
+    replicating.insert(FileRecord.new(name="b.txt", content_hash="h2"))
+    assert len(pushes) == 1

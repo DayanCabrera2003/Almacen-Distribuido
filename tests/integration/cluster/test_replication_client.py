@@ -254,3 +254,25 @@ def test_get_blob_returns_an_empty_blob_as_empty_bytes_not_none(cluster, client_
     reader = client_on(outsider.node_id)
 
     assert reader.get_blob(content_hash) == b""
+
+
+def test_get_blob_rejects_a_corrupted_local_copy(cluster, client_on):
+    """A local blob gets the same integrity check a remote one does.
+
+    Without this, corruption on the coordinator's own disk is served to the
+    client, while the identical corruption on a peer is caught and skipped —
+    so whether a read is trustworthy would depend on which node answered it.
+    """
+    nodes, peers = cluster
+    node_ids = [p.node_id for p in peers]
+    bogus_hash = "d" * 64
+
+    # Corrupt the copy on a node that is itself a replica, and read through it,
+    # so the local branch of get_blob is the one exercised.
+    holder_id = replica_set(bogus_hash, node_ids, r=3)[0]
+    holder = next(n for n in nodes if n.node_id == holder_id)
+    (holder.blob_store._root / bogus_hash).write_bytes(b"locally corrupted")
+
+    client = client_on(holder_id)
+
+    assert client.get_blob(bogus_hash) is None

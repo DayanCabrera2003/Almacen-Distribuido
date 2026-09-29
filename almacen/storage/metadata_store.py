@@ -142,7 +142,11 @@ class MetadataStore:
         self._insert_tags(record.file_id, record.tags)
 
     def upsert(self, record: FileRecord) -> None:
-        """Insert the record, or replace it wholesale if it already exists.
+        """Insert the record, or overwrite the stored one if the file is known.
+
+        Every mutable field is replaced; `created_at` is not, because a file's
+        creation time never changes and the local copy is at least as
+        authoritative as an incoming one.
 
         Used when applying a record replicated from another node, where this node
         may or may not already know the file.

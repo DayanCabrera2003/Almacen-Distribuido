@@ -58,6 +58,13 @@ class ReplicationClient:
             self._blob_store.put(content)
             acknowledged += 1
 
+        # Every replica is attempted and waited for, and only then is W
+        # evaluated — rather than acknowledging the client as soon as the W-th
+        # ack arrives. Early acknowledgement is faster and is the Dynamo
+        # behaviour, but it is only correct once something finishes or repairs
+        # the replicas still in flight, which is Phase 4's anti-entropy. Doing it
+        # now would mean accepting writes that nothing ever completes, so a blob
+        # could sit below R replicas forever with nothing noticing.
         remotes = [n for n in replicas if n != self._settings.node_id]
         if remotes:
             with ThreadPoolExecutor(max_workers=len(remotes)) as pool:
@@ -81,8 +88,19 @@ class ReplicationClient:
         problem, which the API layer surfaces as 503.
         """
         local = self._blob_store.get(content_hash)
-        if local is not None:
+        # Verify the local copy too, not just copies fetched from peers. Content
+        # is addressed by its hash, so the address doubles as a checksum — but
+        # only if it is actually checked. Skipping it here would mean corruption
+        # on this node's disk is served to the client while the same corruption
+        # on a peer is caught, so whether a read can be trusted would depend on
+        # which node answered it. Costs one SHA-256 over data already in memory.
+        if local is not None and _matches(local, content_hash):
             return local
+        if local is not None:
+            logger.error(
+                "local copy of %s is corrupt, falling back to a replica",
+                content_hash[:12],
+            )
 
         # HRW order doubles as a preference order: every node tries the replicas
         # in the same sequence, so reads concentrate on the same node and benefit
@@ -133,9 +151,9 @@ class ReplicationClient:
             )
             return None
 
-        # Content is addressed by its hash, so the address is also a checksum.
-        # Verifying is nearly free and turns silent corruption into a miss.
-        if hashlib.sha256(received).hexdigest() != content_hash:
+        # Same check as on the local path: turns silent corruption into a miss,
+        # so the caller falls through to the next replica.
+        if not _matches(received, content_hash):
             logger.error(
                 "replica %s served content that does not match %s",
                 node_id,
@@ -146,6 +164,11 @@ class ReplicationClient:
 
     def close(self) -> None:
         self._channels.close()
+
+
+def _matches(content: bytes, content_hash: str) -> bool:
+    """Whether content actually hashes to the address it was stored under."""
+    return hashlib.sha256(content).hexdigest() == content_hash
 
 
 def _chunk(content: bytes, content_hash: str):
