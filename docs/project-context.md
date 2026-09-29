@@ -1,10 +1,15 @@
 # Project Context — Tag-Based Distributed File Store
 
-This document tracks the assignment brief and the design decisions made so far, so
-any future session (with or without prior conversation history) can pick up the
-project without re-deriving context. It will be superseded by a formal design spec
-once the full architecture discussion is finished; until then, this is the source
-of truth.
+This document preserves the original assignment brief and the early framing that
+led to the architecture, so any future session can pick up the project without
+re-deriving context.
+
+**It is no longer the source of truth for the design.** That is
+`docs/superpowers/specs/2026-09-28-tag-based-distributed-store-design.md`, which
+is approved and supersedes every design statement below. Where the two disagree,
+the spec wins. What is kept here is the brief (verbatim, as the requirement of
+record) and the reasoning behind the earliest decisions, which the spec states as
+conclusions without re-arguing them.
 
 ## Assignment brief (original, verbatim)
 
@@ -106,29 +111,26 @@ Gossip protocol, SWIM-inspired but simplified, implemented by hand on top of gRP
 component in its own right): periodic heartbeats, suspicion before declaring a
 node dead, propagation of membership changes via gossip.
 
-## Still to be decided (remaining brainstorming blocks)
+## Design questions that were open here — and where they were settled
 
-- Storage layer details: local persistence for blobs (filesystem) and metadata
-  (likely SQLite per node) — not yet finalized.
-- Replication/placement mechanics: rendezvous hashing parameters, replication
-  factor R, write/read quorum behavior for content.
-- Concurrency & conflict resolution: CRDT choice for tags (leaning OR-Set),
-  LWW-register vs. sibling-versions for single-value fields (name, content
-  pointer), vector clocks for causality tracking.
-- Deletion semantics: tombstone-based soft delete, propagation via anti-entropy,
-  GC/purge policy, reference counting for deduplicated blobs.
-- Anti-entropy / reconciliation mechanics: push-pull gossip of metadata state,
-  possible Merkle-tree diffing for efficiency at larger scale.
-- Full tech stack (FastAPI, grpcio, SQLite, etc.) — to be confirmed as a block.
-- Repository/package structure (atomic files, separated responsibilities).
-- Testing strategy, chaos testing (partition injection), observability.
-- Phased roadmap for solo, incremental implementation.
+Every item this document once listed as undecided is now resolved in the approved
+spec. Kept as an index so the reasoning is findable rather than re-derived:
 
-## Process note
+| Question | Settled in |
+| --- | --- |
+| Local persistence for blobs and metadata | spec §7 — flat filesystem for blobs, SQLite in WAL mode for metadata |
+| Placement and replication parameters | spec §2 and §8 — HRW over `content_hash`, N=5, R=3, W=2 |
+| Concurrency and conflict resolution | spec §9 — OR-Set for tags, LWW-register for name/content_hash/tombstone |
+| Causality tracking | spec §6 — one vector clock per `FileRecord`, not per field |
+| Deletion semantics | spec §10 — tombstones, grace TTL, reference-counted blob GC |
+| Anti-entropy mechanics | spec §11 — push-pull gossip of `file_id → vector_clock` digests; Merkle diffing deferred |
+| Tech stack | spec §13 |
+| Repository structure | spec §14 |
+| Testing and observability | spec §13 and §16 (phase 6) |
+| Phased roadmap | spec §16 — six phases |
 
-This project is being designed via the `brainstorming` workflow: clarifying
-questions → proposed approaches → design presented in approved sections → written
-spec → spec review → implementation plan. This file is an intermediate checkpoint,
-not the final spec. The formal spec will land under
-`docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` once the full design is
-approved.
+## Status
+
+The design phase is complete; implementation is under way, one spec phase at a
+time. Plans live in `docs/superpowers/plans/`. See `README.md` for what currently
+works and how to run it.
