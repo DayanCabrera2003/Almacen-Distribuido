@@ -7,8 +7,8 @@ brief.
 
 ## Status
 
-Phase 3 (CRDTs and concurrency) — concurrent edits made on different nodes now
-converge instead of clobbering each other.
+Phase 4 (gossip, partitions and reconciliation) — the cluster now survives nodes
+going away and coming back.
 
 Content is stored on R=3 of N=5 nodes chosen by rendezvous hashing, acknowledged
 after W=2 replicas confirm. Metadata is replicated in full to every node, so any
@@ -29,10 +29,21 @@ node answers any query, and metadata is merged rather than overwritten:
   quietly) from a genuinely concurrent one (resolved by last-writer-wins and
   logged with both clocks).
 
-Still missing: membership is static and updates only move by direct push, so a
-node that misses one stays behind until something re-sends — gossip and
-anti-entropy are Phase 4. Tombstones are never purged and orphaned blobs are
-never reclaimed, which is Phase 5.
+Nodes track each other's health with a SWIM-style failure detector — a failed
+probe means *suspicion*, not death, and a node wrongly suspected refutes the
+claim rather than being evicted. Every few seconds each node runs a push-pull
+anti-entropy round with a couple of peers: they exchange a `file_id → vector
+clock` digest, transfer only the records that actually differ, and merge them
+with the Phase 3 CRDT merge. A node also fetches any blob it is an HRW replica
+for but does not hold, so content catches up along with metadata.
+
+The practical effect: a write made while a node is unreachable reaches it once
+the partition heals, rather than being lost forever.
+
+Still missing: tombstones are never purged and orphaned blobs are never
+reclaimed, which is Phase 5. There is no `/cluster/status` endpoint yet — the
+membership view is in-process only — and no structured logging or CLI, which
+are Phase 6.
 
 ### Upgrading from Phase 2
 
@@ -66,6 +77,10 @@ Each node reads its configuration from the environment:
 | `ALMACEN_REPLICATION_FACTOR` | `3` | R — replicas per blob |
 | `ALMACEN_WRITE_QUORUM` | `2` | W — replicas that must confirm a write |
 | `ALMACEN_RPC_TIMEOUT_SECONDS` | `5.0` | Ceiling on one replicated write against an unresponsive peer |
+| `ALMACEN_GOSSIP_INTERVAL_SECONDS` | `5.0` | Seconds between anti-entropy rounds. **Zero or less disables gossip entirely** |
+| `ALMACEN_SUSPICION_TIMEOUT_SECONDS` | `15.0` | How long a peer stays *suspect* before being declared dead |
+| `ALMACEN_GOSSIP_FANOUT` | `2` | Peers contacted per round |
+| `ALMACEN_BLOB_CATCHUP_BUDGET` | `8` | Most blobs fetched in one round, so a long catch-up cannot monopolise the loop |
 
 With `ALMACEN_PEERS` unset the node is a one-node cluster: the replica set for
 any blob is that single node, and the acknowledgements required shrink to match
@@ -85,6 +100,37 @@ serves content it does not itself hold by fetching it from a replica:
 Nodes have no startup ordering, so an upload issued in the first seconds after
 `up` may return 503 while peers are still binding their gRPC ports. Give the
 cluster a moment before the first request.
+
+The Compose file shortens the gossip interval to 2s and the suspicion timeout to
+6s, so reconciliation is observable within a demo session rather than on the
+production schedule.
+
+### Demonstrating a partition
+
+    docker compose -f docker/docker-compose.yml up --build -d
+    sleep 8
+
+    # Cut node5 off from the cluster network.
+    docker network disconnect almacen_default almacen-node5-1
+
+    # Write while it is isolated.
+    FILE_ID=$(curl -s -F "file=@README.md" -F "name=during-partition.md" \
+      -F "tags=partitioned" http://127.0.0.1:8001/files \
+      | python3 -c "import sys,json; print(json.load(sys.stdin)['file_id'])")
+
+    curl -s -o /dev/null -w "node2: %{http_code}\n" http://127.0.0.1:8002/files/$FILE_ID
+    curl -s -o /dev/null -w "node5: %{http_code}\n" http://127.0.0.1:8005/files/$FILE_ID
+
+    # Heal, and give gossip a few rounds.
+    docker network connect almacen_default almacen-node5-1
+    sleep 10
+    curl -s -o /dev/null -w "node5: %{http_code}\n" http://127.0.0.1:8005/files/$FILE_ID
+
+node2 answers `200` throughout. node5 answers `000` while partitioned — not
+`404`: `docker network disconnect` removes the container from the network
+entirely, so its published port stops answering too, and curl cannot connect at
+all. After healing it answers `200`, having learned both the record and the
+content through gossip.
 
 Tear down with `docker compose -f docker/docker-compose.yml down -v`.
 
@@ -132,7 +178,7 @@ Notes:
       crdt/              # OrSet, LWWRegister, VectorClock — pure, no I/O
       storage/           # BlobStore (filesystem), MetadataStore (SQLite), TagIndex
       rpc/               # node-to-node gRPC: protos, generated stubs, servicers
-      cluster/           # placement (HRW), replication client, metadata replication
+      cluster/           # placement (HRW), replication, membership, gossip, anti-entropy
       api/               # schemas, dependency providers, routers
     docker/              # Dockerfile + five-node Compose cluster
     scripts/             # gen_protos.sh
