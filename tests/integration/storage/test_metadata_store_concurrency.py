@@ -32,11 +32,11 @@ def _run_concurrently(targets) -> None:
 
 def test_concurrent_tag_additions_do_not_lose_each_other(tmp_path: Path):
     store = MetadataStore(tmp_path / "metadata.db")
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"base"})
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"base"})
     store.insert(record)
 
     def add(tag: str):
-        return lambda: store.mutate(record.file_id, lambda stored: stored.add_tag(tag))
+        return lambda: store.mutate(record.file_id, lambda stored: stored.add_tag(tag, "node1"))
 
     added = {f"tag{i}" for i in range(WRITER_COUNT)}
     _run_concurrently([add(tag) for tag in sorted(added)])
@@ -46,14 +46,14 @@ def test_concurrent_tag_additions_do_not_lose_each_other(tmp_path: Path):
 
 def test_a_concurrent_rename_and_tag_changes_all_survive(tmp_path: Path):
     store = MetadataStore(tmp_path / "metadata.db")
-    record = FileRecord.new(name="before.txt", content_hash="h1", tags={"base"})
+    record = FileRecord.new(name="before.txt", content_hash="h1", node_id="node1", tags={"base"})
     store.insert(record)
 
     def rename():
-        store.mutate(record.file_id, lambda stored: stored.rename("after.txt"))
+        store.mutate(record.file_id, lambda stored: stored.rename("after.txt", "node1"))
 
     def add(tag: str):
-        return lambda: store.mutate(record.file_id, lambda stored: stored.add_tag(tag))
+        return lambda: store.mutate(record.file_id, lambda stored: stored.add_tag(tag, "node1"))
 
     added = {f"tag{i}" for i in range(WRITER_COUNT)}
     _run_concurrently([rename] + [add(tag) for tag in sorted(added)])
@@ -66,12 +66,12 @@ def test_a_concurrent_rename_and_tag_changes_all_survive(tmp_path: Path):
 def test_concurrent_tag_removals_do_not_resurrect_each_other(tmp_path: Path):
     initial = {f"tag{i}" for i in range(WRITER_COUNT)}
     store = MetadataStore(tmp_path / "metadata.db")
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"base"} | initial)
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"base"} | initial)
     store.insert(record)
 
     def remove(tag: str):
         return lambda: store.mutate(
-            record.file_id, lambda stored: stored.remove_tag(tag)
+            record.file_id, lambda stored: stored.remove_tag(tag, "node1")
         )
 
     _run_concurrently([remove(tag) for tag in sorted(initial)])
@@ -81,15 +81,15 @@ def test_concurrent_tag_removals_do_not_resurrect_each_other(tmp_path: Path):
 
 def test_mutate_returns_none_for_an_unknown_file(tmp_path: Path):
     store = MetadataStore(tmp_path / "metadata.db")
-    assert store.mutate(uuid.uuid4(), lambda record: record.rename("x")) is None
+    assert store.mutate(uuid.uuid4(), lambda record: record.rename("x", "node1")) is None
 
 
 def test_mutate_returns_the_updated_record(tmp_path: Path):
     store = MetadataStore(tmp_path / "metadata.db")
-    record = FileRecord.new(name="a.txt", content_hash="h1")
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
     store.insert(record)
 
-    returned = store.mutate(record.file_id, lambda stored: stored.rename("b.txt"))
+    returned = store.mutate(record.file_id, lambda stored: stored.rename("b.txt", "node1"))
 
     assert returned is not None and returned.name == "b.txt"
     assert store.get(record.file_id).name == "b.txt"

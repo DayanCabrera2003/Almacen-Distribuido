@@ -54,7 +54,7 @@ def three_nodes(tmp_path: Path):
 
 def test_insert_reaches_every_peer(three_nodes):
     replicated, stores, _ = three_nodes
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"x"})
 
     replicated.insert(record)
 
@@ -67,10 +67,10 @@ def test_insert_reaches_every_peer(three_nodes):
 
 def test_update_reaches_every_peer(three_nodes):
     replicated, stores, _ = three_nodes
-    record = FileRecord.new(name="a.txt", content_hash="h1")
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
     replicated.insert(record)
 
-    record.rename("renamed.txt")
+    record.rename("renamed.txt", "node1")
     replicated.update(record)
 
     for store in stores:
@@ -80,10 +80,10 @@ def test_update_reaches_every_peer(three_nodes):
 
 def test_delete_propagates_as_a_tombstone(three_nodes):
     replicated, stores, _ = three_nodes
-    record = FileRecord.new(name="a.txt", content_hash="h1")
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
     replicated.insert(record)
 
-    record.mark_deleted()
+    record.mark_deleted("node1")
     replicated.update(record)
 
     for store in stores:
@@ -94,7 +94,7 @@ def test_a_dead_peer_does_not_fail_the_write(three_nodes):
     replicated, stores, servers = three_nodes
     servers[2].stop(0).wait()  # node3 is gone
 
-    record = FileRecord.new(name="a.txt", content_hash="h1")
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
     replicated.insert(record)  # must not raise
 
     # The reachable nodes have it; node3's divergence is Phase 4's problem.
@@ -104,7 +104,7 @@ def test_a_dead_peer_does_not_fail_the_write(three_nodes):
 
 def test_reads_are_served_locally(three_nodes):
     replicated, stores, servers = three_nodes
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"x"})
     replicated.insert(record)
 
     for server in servers[1:]:
@@ -136,12 +136,12 @@ def test_an_inbound_replicated_record_is_not_pushed_back_out(three_nodes, tmp_pa
     replicating = ReplicatedMetadataStore(stores[1], RecordingReplicator())
     servicer = ClusterServicer(stores[1], node_id="node2")
 
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"x"})
     servicer.ReplicateRecord(record_to_message(record), context=None)
 
     assert stores[1].get(record.file_id) is not None, "the record was applied locally"
     assert pushes == [], "applying a peer's record must not trigger an outbound push"
 
     # And the wrapper is what would have pushed, proving the recorder works.
-    replicating.insert(FileRecord.new(name="b.txt", content_hash="h2"))
+    replicating.insert(FileRecord.new(name="b.txt", content_hash="h2", node_id="node1"))
     assert len(pushes) == 1

@@ -10,13 +10,13 @@ from almacen.storage.tag_index import TagIndex
 @pytest.fixture
 def index(tmp_path: Path) -> TagIndex:
     metadata_store = MetadataStore(tmp_path / "metadata.db")
-    invoice_only = FileRecord.new(name="a.txt", content_hash="h1", tags={"invoice"})
+    invoice_only = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"invoice"})
     invoice_and_draft = FileRecord.new(
-        name="b.txt", content_hash="h2", tags={"invoice", "draft"}
+        name="b.txt", content_hash="h2", node_id="node1", tags={"invoice", "draft"}
     )
-    draft_only = FileRecord.new(name="c.txt", content_hash="h3", tags={"draft"})
-    deleted_invoice = FileRecord.new(name="d.txt", content_hash="h4", tags={"invoice"})
-    deleted_invoice.mark_deleted()
+    draft_only = FileRecord.new(name="c.txt", content_hash="h3", node_id="node1", tags={"draft"})
+    deleted_invoice = FileRecord.new(name="d.txt", content_hash="h4", node_id="node1", tags={"invoice"})
+    deleted_invoice.mark_deleted("node1")
     for record in (invoice_only, invoice_and_draft, draft_only, deleted_invoice):
         metadata_store.insert(record)
     return TagIndex(metadata_store)

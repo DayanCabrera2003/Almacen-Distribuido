@@ -8,7 +8,7 @@ from almacen.rpc.record_codec import message_to_record, record_to_message
 
 
 def test_round_trips_a_live_record():
-    original = FileRecord.new(name="a.txt", content_hash="h1", tags={"x", "y"})
+    original = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"x", "y"})
 
     restored = message_to_record(record_to_message(original))
 
@@ -23,8 +23,8 @@ def test_round_trips_a_live_record():
 
 
 def test_round_trips_a_tombstoned_record():
-    original = FileRecord.new(name="a.txt", content_hash="h1")
-    original.mark_deleted()
+    original = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
+    original.mark_deleted("node1")
 
     restored = message_to_record(record_to_message(original))
 
@@ -33,13 +33,13 @@ def test_round_trips_a_tombstoned_record():
 
 
 def test_round_trips_a_record_with_no_tags():
-    original = FileRecord.new(name="a.txt", content_hash="h1")
+    original = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
     restored = message_to_record(record_to_message(original))
     assert restored.tags == set()
 
 
 def test_timestamps_survive_as_timezone_aware_values():
-    original = FileRecord.new(name="a.txt", content_hash="h1")
+    original = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
     restored = message_to_record(record_to_message(original))
     assert restored.created_at.tzinfo is not None
     assert restored.created_at == original.created_at

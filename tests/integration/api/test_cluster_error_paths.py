@@ -55,7 +55,7 @@ def test_download_returns_503_when_no_replica_holds_the_blob(tmp_path: Path):
 
     # A record whose content was never stored anywhere: the file is known, the
     # bytes are unreachable.
-    record = FileRecord.new(name="ghost.txt", content_hash="c" * 64)
+    record = FileRecord.new(name="ghost.txt", content_hash="c" * 64, node_id="node1")
     app.state.local_metadata_store.insert(record)
 
     response = client.get(f"/files/{record.file_id}")

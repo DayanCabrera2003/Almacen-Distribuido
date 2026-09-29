@@ -6,7 +6,12 @@ import uuid
 
 from fastapi import APIRouter, Depends
 
-from almacen.api.deps import get_live_record, get_metadata_store, mutate_live_record
+from almacen.api.deps import (
+    get_live_record,
+    get_metadata_store,
+    get_node_id,
+    mutate_live_record,
+)
 from almacen.api.schemas import AddTagsRequest, TagsResponse
 from almacen.domain.file_record import FileRecord
 from almacen.storage.protocols import MetadataStoreLike
@@ -28,10 +33,11 @@ def add_tags(
     file_id: uuid.UUID,
     body: AddTagsRequest,
     metadata_store: MetadataStoreLike = Depends(get_metadata_store),
+    node_id: str = Depends(get_node_id),
 ) -> TagsResponse:
     def apply(record: FileRecord) -> None:
         for tag in body.tags:
-            record.add_tag(tag)
+            record.add_tag(tag, node_id)
 
     updated = mutate_live_record(metadata_store, file_id, apply)
     return TagsResponse(tags=sorted(updated.tags))
@@ -42,8 +48,9 @@ def remove_tag(
     file_id: uuid.UUID,
     tag: str,
     metadata_store: MetadataStoreLike = Depends(get_metadata_store),
+    node_id: str = Depends(get_node_id),
 ) -> TagsResponse:
     updated = mutate_live_record(
-        metadata_store, file_id, lambda record: record.remove_tag(tag)
+        metadata_store, file_id, lambda record: record.remove_tag(tag, node_id)
     )
     return TagsResponse(tags=sorted(updated.tags))

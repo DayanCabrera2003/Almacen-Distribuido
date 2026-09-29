@@ -29,7 +29,7 @@ def stub(metadata_store: MetadataStore, grpc_server_factory):
 
 
 def test_replicate_record_applies_a_new_record(stub, metadata_store: MetadataStore):
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"x"})
 
     ack = stub.ReplicateRecord(record_to_message(record))
 
@@ -41,10 +41,10 @@ def test_replicate_record_applies_a_new_record(stub, metadata_store: MetadataSto
 
 
 def test_replicate_record_overwrites_a_known_record(stub, metadata_store):
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"x"})
     metadata_store.insert(record)
 
-    record.rename("renamed.txt")
+    record.rename("renamed.txt", "node1")
     stub.ReplicateRecord(record_to_message(record))
 
     stored = metadata_store.get(record.file_id)
@@ -52,10 +52,10 @@ def test_replicate_record_overwrites_a_known_record(stub, metadata_store):
 
 
 def test_replicate_record_propagates_a_tombstone(stub, metadata_store):
-    record = FileRecord.new(name="a.txt", content_hash="h1")
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
     metadata_store.insert(record)
 
-    record.mark_deleted()
+    record.mark_deleted("node1")
     stub.ReplicateRecord(record_to_message(record))
 
     assert metadata_store.list_live() == []

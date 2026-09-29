@@ -32,13 +32,25 @@ class ClusterServicer(pb_grpc.ClusterServicer):
                 grpc.StatusCode.INVALID_ARGUMENT, f"undecodable record: {error}"
             )
 
-        # Phase 2 applies the incoming record wholesale (last write to arrive
-        # wins). That is genuinely wrong under concurrency: two nodes editing the
-        # same file during a partition will clobber each other depending on
-        # arrival order. Phase 3 replaces this line with a CRDT merge, which is
-        # the whole reason that phase exists.
-        self._metadata_store.upsert(record)
-        logger.debug("applied replicated record %s", record.file_id)
+        local = self._metadata_store.get(record.file_id)
+        if local is not None and local.is_concurrent_with(record):
+            # Spec §9: a genuine conflict is resolved by last-writer-wins, but
+            # never silently. Logging both clocks is what makes the resolution
+            # auditable — LWW discards one of two concurrent writes, and that
+            # loss should be visible rather than inferred.
+            logger.warning(
+                "concurrent update to %s from %s: local clock %s, incoming %s "
+                "- resolving by last-writer-wins",
+                record.file_id,
+                context.peer() if context is not None else "unknown",
+                local.vector_clock.counters,
+                record.vector_clock.counters,
+            )
+
+        # Merge, never overwrite. An incoming record is one replica's view, not
+        # the truth: the local copy may hold edits the sender never saw.
+        self._metadata_store.merge_remote(record)
+        logger.debug("merged replicated record %s", record.file_id)
         return pb.ReplicateAck(applied=True)
 
     def Ping(

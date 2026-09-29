@@ -11,16 +11,35 @@ service Cluster {
   rpc Ping(PingRequest) returns (PingResponse);
 }
 
+// One occurrence of a tag in the OR-Set. The node_id and counter are what make
+// otherwise-identical adds distinguishable, so a remove cancels exactly the
+// adds it observed.
+message TagOccurrence {
+  string tag = 1;
+  string node_id = 2;
+  int64 counter = 3;
+}
+
 message FileRecordMsg {
   string file_id = 1;
+  // Each single-value field travels with the (timestamp, node_id) that wrote
+  // it; without them the receiver could not run the last-writer-wins merge.
   string name = 2;
-  string content_hash = 3;
-  repeated string tags = 4;
-  bool tombstone = 5;
-  // ISO-8601; empty string means "not set" (proto3 has no null for scalars).
-  string tombstone_at = 6;
-  string created_at = 7;
-  string updated_at = 8;
+  string name_ts = 3;
+  string name_node = 4;
+  string content_hash = 5;
+  string content_hash_ts = 6;
+  string content_hash_node = 7;
+  bool tombstone = 8;
+  string tombstone_ts = 9;
+  string tombstone_node = 10;
+  string created_at = 11;
+  string updated_at = 12;
+  map<string, int64> vector_clock = 13;
+  // The visible tag set is derived from these, and is deliberately not sent
+  // alongside them: two representations of the same thing could disagree.
+  repeated TagOccurrence tag_adds = 14;
+  repeated TagOccurrence tag_removes = 15;
 }
 
 message ReplicateAck {

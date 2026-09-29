@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from almacen.api.deps import (
     get_live_record,
     get_metadata_store,
+    get_node_id,
     get_replication_client,
     get_tag_index,
     mutate_live_record,
@@ -38,6 +39,7 @@ async def upload_file(
     tags: Annotated[str | None, Form()] = None,
     replication_client: ReplicationClient = Depends(get_replication_client),
     metadata_store: MetadataStoreLike = Depends(get_metadata_store),
+    node_id: str = Depends(get_node_id),
 ) -> FileMetadata:
     content = await file.read()
     # These handlers must stay `async def` to await UploadFile.read(), but
@@ -53,6 +55,7 @@ async def upload_file(
     record = FileRecord.new(
         name=name or file.filename or "untitled",
         content_hash=content_hash,
+        node_id=node_id,
         tags=_parse_tags(tags),
     )
     await run_in_threadpool(metadata_store.insert, record)
@@ -103,6 +106,7 @@ async def update_file(
     name: Annotated[str | None, Form()] = None,
     metadata_store: MetadataStoreLike = Depends(get_metadata_store),
     replication_client: ReplicationClient = Depends(get_replication_client),
+    node_id: str = Depends(get_node_id),
 ) -> FileMetadata:
     # Check the file exists before spending a replication round on its content.
     get_live_record(metadata_store, file_id)
@@ -121,9 +125,9 @@ async def update_file(
 
     def apply(record: FileRecord) -> None:
         if name is not None:
-            record.rename(name)
+            record.rename(name, node_id)
         if content_hash is not None:
-            record.update_content(content_hash)
+            record.update_content(content_hash, node_id)
 
     updated = await run_in_threadpool(
         mutate_live_record, metadata_store, file_id, apply
@@ -135,5 +139,8 @@ async def update_file(
 def delete_file(
     file_id: uuid.UUID,
     metadata_store: MetadataStoreLike = Depends(get_metadata_store),
+    node_id: str = Depends(get_node_id),
 ) -> None:
-    mutate_live_record(metadata_store, file_id, lambda record: record.mark_deleted())
+    mutate_live_record(
+        metadata_store, file_id, lambda record: record.mark_deleted(node_id)
+    )

@@ -15,7 +15,7 @@ def store(tmp_path: Path) -> MetadataStore:
 
 
 def test_insert_then_get_returns_equivalent_record(store: MetadataStore):
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x", "y"})
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"x", "y"})
 
     store.insert(record)
     fetched = store.get(record.file_id)
@@ -33,12 +33,12 @@ def test_get_returns_none_for_unknown_id(store: MetadataStore):
 
 
 def test_update_persists_renamed_and_retagged_record(store: MetadataStore):
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"x"})
     store.insert(record)
 
-    record.rename("b.txt")
-    record.add_tag("y")
-    record.remove_tag("x")
+    record.rename("b.txt", "node1")
+    record.add_tag("y", "node1")
+    record.remove_tag("x", "node1")
     store.update(record)
 
     fetched = store.get(record.file_id)
@@ -47,10 +47,10 @@ def test_update_persists_renamed_and_retagged_record(store: MetadataStore):
 
 
 def test_update_persists_tombstone(store: MetadataStore):
-    record = FileRecord.new(name="a.txt", content_hash="h1")
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
     store.insert(record)
 
-    record.mark_deleted()
+    record.mark_deleted("node1")
     store.update(record)
 
     fetched = store.get(record.file_id)
@@ -60,7 +60,7 @@ def test_update_persists_tombstone(store: MetadataStore):
 
 def test_data_survives_reopening_the_same_db_file(tmp_path: Path):
     db_path = tmp_path / "metadata.db"
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1", tags={"x"})
 
     MetadataStore(db_path).insert(record)
     reopened = MetadataStore(db_path)
@@ -71,7 +71,7 @@ def test_data_survives_reopening_the_same_db_file(tmp_path: Path):
 
 
 def test_update_on_unknown_file_id_raises_instead_of_orphaning_tags(store: MetadataStore):
-    ghost = FileRecord.new(name="ghost.txt", content_hash="h1", tags={"orphan"})
+    ghost = FileRecord.new(name="ghost.txt", content_hash="h1", node_id="node1", tags={"orphan"})
 
     with pytest.raises(sqlite3.IntegrityError):
         store.update(ghost)
@@ -80,7 +80,7 @@ def test_update_on_unknown_file_id_raises_instead_of_orphaning_tags(store: Metad
 def test_concurrent_inserts_from_multiple_threads_all_persist_correctly(store: MetadataStore):
     thread_count = 20
     records = [
-        FileRecord.new(name=f"file-{i}.txt", content_hash=f"h{i}", tags={f"tag-{i}", "shared"})
+        FileRecord.new(name=f"file-{i}.txt", content_hash=f"h{i}", node_id="node1", tags={f"tag-{i}", "shared"})
         for i in range(thread_count)
     ]
     errors: list[BaseException] = []
@@ -105,64 +105,12 @@ def test_concurrent_inserts_from_multiple_threads_all_persist_correctly(store: M
 
 
 def test_list_live_excludes_tombstoned_records(store: MetadataStore):
-    live = FileRecord.new(name="live.txt", content_hash="h1")
-    deleted = FileRecord.new(name="deleted.txt", content_hash="h2")
-    deleted.mark_deleted()
+    live = FileRecord.new(name="live.txt", content_hash="h1", node_id="node1")
+    deleted = FileRecord.new(name="deleted.txt", content_hash="h2", node_id="node1")
+    deleted.mark_deleted("node1")
     store.insert(live)
     store.insert(deleted)
 
     results = store.list_live()
 
     assert {r.file_id for r in results} == {live.file_id}
-
-
-def test_upsert_inserts_a_record_the_store_has_never_seen(tmp_path: Path):
-    store = MetadataStore(tmp_path / "m.db")
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
-
-    store.upsert(record)
-
-    stored = store.get(record.file_id)
-    assert stored is not None
-    assert stored.name == "a.txt"
-    assert stored.tags == {"x"}
-
-
-def test_upsert_overwrites_an_existing_record(tmp_path: Path):
-    store = MetadataStore(tmp_path / "m.db")
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x"})
-    store.insert(record)
-
-    record.rename("b.txt")
-    record.add_tag("y")
-    record.remove_tag("x")
-    store.upsert(record)
-
-    stored = store.get(record.file_id)
-    assert stored is not None
-    assert stored.name == "b.txt"
-    assert stored.tags == {"y"}
-
-
-def test_upsert_is_idempotent(tmp_path: Path):
-    store = MetadataStore(tmp_path / "m.db")
-    record = FileRecord.new(name="a.txt", content_hash="h1", tags={"x", "y"})
-
-    store.upsert(record)
-    store.upsert(record)
-
-    assert len(store.list_live()) == 1
-    stored = store.get(record.file_id)
-    assert stored is not None and stored.tags == {"x", "y"}
-
-
-def test_upsert_preserves_a_tombstone(tmp_path: Path):
-    store = MetadataStore(tmp_path / "m.db")
-    record = FileRecord.new(name="a.txt", content_hash="h1")
-    record.mark_deleted()
-
-    store.upsert(record)
-
-    stored = store.get(record.file_id)
-    assert stored is not None and stored.tombstone is True
-    assert store.list_live() == []

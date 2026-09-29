@@ -22,6 +22,11 @@ def get_metadata_store(request: Request) -> MetadataStoreLike:
     return request.app.state.metadata_store
 
 
+def get_node_id(request: Request) -> str:
+    """This node's identity, which every CRDT mutation is attributed to."""
+    return request.app.state.settings.node_id
+
+
 def get_tag_index(request: Request) -> TagIndex:
     return request.app.state.tag_index
 
