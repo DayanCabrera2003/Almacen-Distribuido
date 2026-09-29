@@ -178,7 +178,20 @@ def test_merge_keeps_the_earlier_creation_time():
     left = FileRecord.new(name="a", content_hash="h", node_id="node1")
     right = left.copy()
     right.created_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+    # Both directions: asserting only the case where `self` is already the
+    # earlier one would pass against `created_at=self.created_at`.
     assert left.merged(right).created_at == left.created_at
+    assert right.merged(left).created_at == left.created_at
+
+
+def test_merge_keeps_the_later_update_time():
+    left = FileRecord.new(name="a", content_hash="h", node_id="node1")
+    right = left.copy()
+    right.rename("b", "node2")
+
+    assert left.merged(right).updated_at == right.updated_at
+    assert right.merged(left).updated_at == right.updated_at
 
 
 def test_merging_different_files_is_a_programming_error():

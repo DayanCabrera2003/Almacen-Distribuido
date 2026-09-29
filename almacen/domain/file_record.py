@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from almacen.crdt.lww_register import LWWRegister
 from almacen.crdt.or_set import OrSet
 from almacen.crdt.vector_clock import VectorClock
+
+
+# Smallest step that keeps two consecutive writes distinguishable. datetime
+# resolves to microseconds, so this is the finest gap that survives a round-trip
+# through ISO-8601 and SQLite.
+_TIMESTAMP_STEP = timedelta(microseconds=1)
 
 
 def _utcnow() -> datetime:
@@ -34,9 +40,9 @@ class FileRecord:
     tag_set: OrSet
     vector_clock: VectorClock
     created_at: datetime
-    # Monotonic, so merging is plain max — no tie-break needed. Kept separate
-    # from the registers because tag edits must bump it and the OR-Set carries
-    # no timestamps of its own.
+    # Monotonic per record (see `_touch`), so merging is plain max — no
+    # tie-break needed. Kept separate from the registers because tag edits must
+    # bump it and the OR-Set carries no timestamps of its own.
     updated_at: datetime = field(default_factory=_utcnow)
 
     # ---- read interface: unchanged from Phase 2 ----
@@ -116,9 +122,41 @@ class FileRecord:
         self.tombstone_register = LWWRegister(True, self.updated_at, node_id)
 
     def _touch(self, node_id: str) -> int:
-        """Record one mutation by `node_id`; returns its counter."""
-        self.updated_at = _utcnow()
+        """Stamp one mutation by `node_id`; returns its counter.
+
+        The timestamp is a *hybrid logical* one: wall-clock time, but never at
+        or before the newest timestamp this record already carries. Taking the
+        bare wall clock breaks three things, silently, because the
+        last-writer-wins rank would no longer be strictly increasing per record:
+
+        - two writes by the same node inside one clock tick get identical
+          ranks, and `merged` stops being commutative — the two nodes that see
+          them in opposite orders disagree forever;
+        - a delete issued on a node whose clock lags loses to the record's own
+          earlier state, and the file is resurrected (spec §6 claims delete
+          always wins, which only holds if clocks are monotone across nodes —
+          this is what makes that claim true here);
+        - a write made *after* observing a future-dated remote write loses to
+          it, so the user's change vanishes with no error.
+
+        Deriving the floor from the record rather than from the machine makes
+        the rank monotonic along each record's own causal history, which is the
+        property last-writer-wins actually needs. The cost is that one peer with
+        a badly fast clock drags a record's timestamps forward and they stay
+        there; bounding that drift is what a full hybrid logical clock adds, and
+        is not needed at this scale.
+        """
+        self.updated_at = max(_utcnow(), self._newest_timestamp() + _TIMESTAMP_STEP)
         return self.vector_clock.increment(node_id)
+
+    def _newest_timestamp(self) -> datetime:
+        """The latest instant this record already carries anywhere."""
+        return max(
+            self.updated_at,
+            self.name_register.timestamp,
+            self.content_hash_register.timestamp,
+            self.tombstone_register.timestamp,
+        )
 
     # ---- replication ----
 

@@ -177,7 +177,7 @@ class MetadataStore:
                 name = ?, name_ts = ?, name_node = ?,
                 content_hash = ?, content_hash_ts = ?, content_hash_node = ?,
                 tombstone = ?, tombstone_ts = ?, tombstone_node = ?,
-                updated_at = ?, vector_clock = ?
+                created_at = ?, updated_at = ?, vector_clock = ?
             WHERE file_id = ?
             """,
             (
@@ -190,6 +190,11 @@ class MetadataStore:
                 int(record.tombstone),
                 _dt_to_str(record.tombstone_register.timestamp),
                 record.tombstone_register.node_id,
+                # `merged` takes the earlier created_at, so a merge can
+                # legitimately change it. Omitting it here would silently
+                # discard that, leaving the stored record different from the
+                # one the merge just computed.
+                _dt_to_str(record.created_at),
                 _dt_to_str(record.updated_at),
                 json.dumps(record.vector_clock.counters, sort_keys=True),
                 str(record.file_id),
