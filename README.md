@@ -17,7 +17,14 @@ node answers any query, and metadata is merged rather than overwritten:
 - **tags** are an observed-remove set, so a tag added on one node survives a
   concurrent removal on another;
 - **name**, **content pointer** and **tombstone** are last-writer-wins registers
-  with a `(timestamp, node_id)` tie-break, so every node picks the same winner;
+  with a `(timestamp, node_id)` tie-break, so every node picks the same winner.
+  Write timestamps are monotonic *per record* — each mutation is stamped above
+  the newest timestamp the record already carries — so a write always outranks
+  what it observed. Without that floor, a delete issued on a node with a lagging
+  clock could resurrect a file, and two writes in one clock tick could leave
+  replicas permanently disagreeing. Clock skew between nodes therefore affects
+  *which* of two genuinely concurrent writes wins, but cannot undo a write that
+  causally followed another;
 - a **vector clock** per record separates a causally stale update (discarded
   quietly) from a genuinely concurrent one (resolved by last-writer-wins and
   logged with both clocks).

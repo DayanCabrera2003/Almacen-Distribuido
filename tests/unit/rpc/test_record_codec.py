@@ -98,3 +98,29 @@ def test_a_decoded_record_merges_identically_to_the_original():
     assert crdt_state(decoded.merged(from_peer)) == crdt_state(
         record.merged(from_peer)
     )
+
+
+def test_rejects_naive_timestamps():
+    """A peer sending naive timestamps would poison the record permanently.
+
+    The record is accepted and stored, and from then on every merge on that
+    file_id raises `TypeError: can't compare offset-naive and offset-aware
+    datetimes` out of the LWW comparison — surfacing as an opaque gRPC UNKNOWN
+    on every later replication, unrecoverable without editing the database.
+    The codec is the trust boundary, so it rejects them here.
+    """
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
+    message = record_to_message(record)
+    message.name_ts = "2026-01-01T00:00:00"  # no offset
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        message_to_record(message)
+
+
+def test_rejects_a_naive_created_at():
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
+    message = record_to_message(record)
+    message.created_at = "2026-01-01T00:00:00"
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        message_to_record(message)

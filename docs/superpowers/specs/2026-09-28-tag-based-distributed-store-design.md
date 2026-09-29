@@ -109,7 +109,12 @@ delete's timestamp is always later than the field's prior (untouched) value, so
 in practice this LWW rule is equivalent to "delete is monotonic": a concurrent
 delete on one node always outlasts a concurrent non-delete edit (rename, tag
 change) to the same record on another node, since that edit never writes to the
-`tombstone` field and so cannot produce a competing timestamp for it. The other
+`tombstone` field and so cannot produce a competing timestamp for it. **This
+holds only because write timestamps are monotonic per record** (see the vector
+clock note above): with bare wall-clock stamps, a delete issued on a node whose
+clock lags behind the record's creation time would lose to the record's own
+initial `tombstone=false` value, and the file would be resurrected on every
+replica. The other
 fields' own LWW/OR-Set values from the concurrent edit still merge normally and
 remain in the stored record — they are just not visible through the API once
 `tombstone=true` (§10).
@@ -122,14 +127,51 @@ everywhere a "counter" is needed for that mutation (including as the `counter` i
 an OR-Set tag element, §9 — there is only one counter source, not two). When
 merging two copies of the same `file_id` from different nodes:
 
-- If one record's vector clock dominates the other's (≥ in every component, >
-  in at least one), it is causally newer: its LWW field values are taken as-is,
-  no conflict.
-- If neither dominates (concurrent), it is a genuine conflict for the LWW fields
-  (name, content_hash), resolved as described in §9. Tags never need this
-  distinction — the OR-Set merge rule (union of adds minus observed removes) is
-  correct regardless of causality.
+- If neither clock dominates the other (concurrent), it is a genuine conflict
+  for the LWW fields (name, content_hash), resolved as described in §9, and
+  logged. Tags never need this distinction — the OR-Set merge rule (union of
+  adds minus observed removes) is correct regardless of causality.
 - The merged record's vector clock is the component-wise max of both inputs.
+
+**Corrected during Phase 3 implementation — dominance does not short-circuit
+the merge.** This section previously said that when one record's clock
+dominates the other's, "its LWW field values are taken as-is, no conflict".
+That rule is unsound and was not implemented. Making the merge consult
+dominance **breaks associativity**, so replicas that receive the same updates
+in different groupings end up in different states — the exact failure CRDTs
+exist to prevent. Counterexample, verified against the implementation, with a
+single clock per record:
+
+```
+A = ("A", t=10, node1, clock {n1:1})
+B = ("B", t=20, node2, clock {n2:1})
+C = ("C", t=30, node1, clock {n1:1})
+
+(A ∨ B) ∨ C  ->  "B"    # (A ∨ B).clock = {n1:1, n2:1} dominates C's {n1:1},
+                        # so C is discarded as "causally older"
+A ∨ (B ∨ C)  ->  "C"    # B ∨ C resolves to C by timestamp, and A does not
+                        # dominate it
+```
+
+The cause is that a merged clock accumulates components from both inputs, so an
+intermediate result can dominate a record it never actually descended from.
+Per-field clocks would not fix it either; it is inherent to mixing a causal
+short-circuit with a value-based tie-break.
+
+The merge is therefore **purely field-wise**: LWW on `(timestamp, node_id)` for
+the single-value fields, OR-Set union for tags, component-wise max for the
+clock. This is commutative, associative and idempotent.
+
+The useful part of the discarded rule — "a write that observed another write
+should beat it" — is recovered without touching the merge, by making write
+timestamps monotonic per record: a mutation is stamped
+`max(now, newest_timestamp_on_this_record + 1µs)`. A write that observed a
+remote write therefore outranks it by timestamp alone, and the same mechanism
+is what makes the tombstone rule below hold under clock skew. See
+`DAA/vector-clocks-and-conflict-detection.md`.
+
+The vector clock's remaining job is **detecting** concurrency so genuine
+conflicts can be logged (§9), not resolving it.
 
 ## 7. Storage layer (per node, local)
 

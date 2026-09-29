@@ -53,6 +53,22 @@ def message_to_record(message: pb.FileRecordMsg) -> FileRecord:
     if name_ts is None or content_hash_ts is None or tombstone_ts is None:
         raise ValueError("every last-writer-wins field needs a timestamp")
 
+    # Naive timestamps would be accepted, stored, and then raise
+    # `TypeError: can't compare offset-naive and offset-aware datetimes` out of
+    # every subsequent merge on this file — an opaque gRPC UNKNOWN forever
+    # after, unrecoverable without editing the database. The codec is the trust
+    # boundary between this node and a peer that may be buggy or older, so the
+    # check belongs here rather than deeper in.
+    for label, value in (
+        ("created_at", created_at),
+        ("updated_at", updated_at),
+        ("name_ts", name_ts),
+        ("content_hash_ts", content_hash_ts),
+        ("tombstone_ts", tombstone_ts),
+    ):
+        if value.tzinfo is None:
+            raise ValueError(f"{label} must be timezone-aware, got {value!r}")
+
     return FileRecord(
         file_id=uuid.UUID(message.file_id),
         name_register=LWWRegister(message.name, name_ts, message.name_node),

@@ -28,9 +28,15 @@ class ClusterServicer(pb_grpc.ClusterServicer):
         try:
             record = message_to_record(request)
         except ValueError as error:
-            context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT, f"undecodable record: {error}"
-            )
+            # `abort` raises, but it is not typed NoReturn, so without the
+            # explicit raise the reader (and the type checker) cannot tell that
+            # `record` below is always bound. The guard also keeps the two
+            # calling conventions consistent: tests may pass context=None.
+            if context is not None:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT, f"undecodable record: {error}"
+                )
+            raise
 
         local = self._metadata_store.get(record.file_id)
         if local is not None and local.is_concurrent_with(record):
