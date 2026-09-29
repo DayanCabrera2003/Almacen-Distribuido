@@ -187,6 +187,15 @@ class MetadataStore:
             ).fetchall()
             return [self._row_to_record(row) for row in rows]
 
+    def close(self) -> None:
+        """Release the SQLite connection.
+
+        Each `create_app` opens one; without this they accumulate for the life
+        of the process, which the in-process multi-node tests do five at a time.
+        """
+        with self._lock:
+            self._conn.close()
+
     def _insert_tags(self, file_id: uuid.UUID, tags: set[str]) -> None:
         self._conn.executemany(
             "INSERT INTO file_tags (file_id, tag) VALUES (?, ?)",

@@ -23,11 +23,6 @@ class ReplicatedMetadataStore:
         self._local = local
         self._replicator = replicator
 
-    @property
-    def local(self) -> MetadataStore:
-        """The underlying local store, for components that must not replicate."""
-        return self._local
-
     def insert(self, record: FileRecord) -> None:
         self._local.insert(record)
         self._replicator.replicate(record)

@@ -68,3 +68,19 @@ def test_rejects_a_malformed_peer_entry(monkeypatch):
     monkeypatch.setenv("ALMACEN_PEERS", "node1-no-at-sign")
     with pytest.raises(ValueError, match="peer"):
         Settings.from_env()
+
+
+def test_rpc_timeout_defaults_and_is_configurable(monkeypatch):
+    assert Settings(
+        data_dir=Path("/tmp/b"), db_path=Path("/tmp/m.db")
+    ).rpc_timeout_seconds == 5.0
+
+    monkeypatch.setenv("ALMACEN_RPC_TIMEOUT_SECONDS", "1.5")
+    assert Settings.from_env().rpc_timeout_seconds == 1.5
+
+
+def test_rejects_a_non_positive_rpc_timeout():
+    with pytest.raises(ValueError, match="rpc_timeout_seconds"):
+        Settings(
+            data_dir=Path("/tmp/b"), db_path=Path("/tmp/m.db"), rpc_timeout_seconds=0
+        )

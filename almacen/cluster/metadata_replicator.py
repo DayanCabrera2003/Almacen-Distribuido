@@ -15,8 +15,6 @@ from almacen.rpc.record_codec import record_to_message
 
 logger = logging.getLogger(__name__)
 
-RPC_TIMEOUT_SECONDS = 5.0
-
 
 class MetadataReplicator:
     """Best-effort push of a record to all peers.
@@ -46,7 +44,7 @@ class MetadataReplicator:
     def _push(self, peer, message) -> None:
         try:
             stub = pb_grpc.ClusterStub(self._channels.channel(peer.address))
-            stub.ReplicateRecord(message, timeout=RPC_TIMEOUT_SECONDS)
+            stub.ReplicateRecord(message, timeout=self._settings.rpc_timeout_seconds)
         except grpc.RpcError as error:
             logger.warning(
                 "could not replicate record %s to %s: %s",
@@ -56,4 +54,10 @@ class MetadataReplicator:
             )
 
     def close(self) -> None:
+        """Close the channel pool.
+
+        Only safe when this replicator owns its pool. When a pool is shared with
+        other clients — as it is in `create_app` — the owner closes it instead,
+        or this would disconnect the others too.
+        """
         self._channels.close()

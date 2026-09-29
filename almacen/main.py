@@ -53,7 +53,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         server.stop(GRPC_SHUTDOWN_GRACE_SECONDS).wait()
+        # The pool is shared by both cluster clients, so it is closed here by its
+        # owner rather than by either of them.
         app.state.channels.close()
+        app.state.local_metadata_store.close()
         logger.info("node %s stopped", settings.node_id)
 
 

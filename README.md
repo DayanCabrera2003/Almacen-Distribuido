@@ -39,6 +39,7 @@ Each node reads its configuration from the environment:
 | `ALMACEN_PEERS` | *(empty)* | `node_id@host:port,...` for every node **including this one**; empty means single-node |
 | `ALMACEN_REPLICATION_FACTOR` | `3` | R — replicas per blob |
 | `ALMACEN_WRITE_QUORUM` | `2` | W — replicas that must confirm a write |
+| `ALMACEN_RPC_TIMEOUT_SECONDS` | `5.0` | Ceiling on one replicated write against an unresponsive peer |
 
 With `ALMACEN_PEERS` unset the node is a one-node cluster: the replica set for
 any blob is that single node, and the acknowledgements required shrink to match
@@ -54,6 +55,10 @@ serves content it does not itself hold by fetching it from a replica:
 
     curl -F "file=@README.md" -F "name=README.md" -F "tags=demo" http://127.0.0.1:8001/files
     curl "http://127.0.0.1:8005/files?tags=demo"
+
+Nodes have no startup ordering, so an upload issued in the first seconds after
+`up` may return 503 while peers are still binding their gRPC ports. Give the
+cluster a moment before the first request.
 
 Tear down with `docker compose -f docker/docker-compose.yml down -v`.
 

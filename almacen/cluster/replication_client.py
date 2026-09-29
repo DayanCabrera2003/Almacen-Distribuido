@@ -18,8 +18,6 @@ from almacen.storage.blob_store import BlobStore
 
 logger = logging.getLogger(__name__)
 
-RPC_TIMEOUT_SECONDS = 5.0
-
 
 class QuorumNotReached(RuntimeError):
     """Fewer than W replicas accepted a write, so it is not durable enough."""
@@ -75,6 +73,11 @@ class ReplicationClient:
                 acknowledged += sum(1 for succeeded in results if succeeded)
 
         if acknowledged < required:
+            # The replicas that did accept the write keep their copy, and no
+            # metadata will ever point at it. Those bytes are unreferenced until
+            # Phase 5's reference-counting GC collects them; rolling them back
+            # here would need its own quorum to be reliable, and would fail in
+            # exactly the situation that triggered this path.
             raise QuorumNotReached(
                 f"only {acknowledged} of {len(replicas)} replicas stored "
                 f"{content_hash[:12]}, need {required}"
@@ -122,7 +125,7 @@ class ReplicationClient:
             return False
         try:
             stub = pb_grpc.ReplicationStub(self._channels.channel(address))
-            stub.PutBlob(_chunk(content, content_hash), timeout=RPC_TIMEOUT_SECONDS)
+            stub.PutBlob(_chunk(content, content_hash), timeout=self._settings.rpc_timeout_seconds)
             return True
         except grpc.RpcError as error:
             # Swallowed on purpose: a single failed replica is not a failed
@@ -142,7 +145,7 @@ class ReplicationClient:
                 chunk.data
                 for chunk in stub.GetBlob(
                     pb.BlobRequest(content_hash=content_hash),
-                    timeout=RPC_TIMEOUT_SECONDS,
+                    timeout=self._settings.rpc_timeout_seconds,
                 )
             )
         except grpc.RpcError as error:
@@ -161,10 +164,6 @@ class ReplicationClient:
             )
             return None
         return received
-
-    def close(self) -> None:
-        self._channels.close()
-
 
 def _matches(content: bytes, content_hash: str) -> bool:
     """Whether content actually hashes to the address it was stored under."""

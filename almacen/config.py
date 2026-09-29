@@ -8,6 +8,9 @@ from pathlib import Path
 
 DEFAULT_GRPC_PORT = 50051
 DEFAULT_NODE_ID = "node1"
+# Ceiling on how long one replicated write waits on an unresponsive peer, and
+# therefore on how long a client request can take when a peer is black-holed.
+DEFAULT_RPC_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,7 @@ class Settings:
     peers: tuple[Peer, ...] = field(default_factory=tuple)
     replication_factor: int = 3
     write_quorum: int = 2
+    rpc_timeout_seconds: float = DEFAULT_RPC_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if self.replication_factor < 1:
@@ -47,6 +51,10 @@ class Settings:
             )
         if self.write_quorum < 1:
             raise ValueError(f"write_quorum must be >= 1, got {self.write_quorum}")
+        if self.rpc_timeout_seconds <= 0:
+            raise ValueError(
+                f"rpc_timeout_seconds must be > 0, got {self.rpc_timeout_seconds}"
+            )
         if self.write_quorum > self.replication_factor:
             raise ValueError(
                 f"write_quorum ({self.write_quorum}) cannot exceed "
@@ -89,4 +97,7 @@ class Settings:
             peers=peers,
             replication_factor=int(os.environ.get("ALMACEN_REPLICATION_FACTOR", 3)),
             write_quorum=int(os.environ.get("ALMACEN_WRITE_QUORUM", 2)),
+            rpc_timeout_seconds=float(
+                os.environ.get("ALMACEN_RPC_TIMEOUT_SECONDS", DEFAULT_RPC_TIMEOUT_SECONDS)
+            ),
         )
