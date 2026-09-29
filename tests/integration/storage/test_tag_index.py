@@ -40,3 +40,15 @@ def test_no_tags_returns_all_live_files(index: TagIndex):
 def test_query_excludes_tombstoned_files(index: TagIndex):
     results = index.query(["invoice"], mode="or")
     assert "d.txt" not in {r.name for r in results}
+
+
+def test_no_tags_in_or_mode_still_returns_all_live_files(index: TagIndex):
+    # Guards the early return in query(): without it the "or" predicate would
+    # intersect against an empty tag set and match nothing.
+    results = index.query(tags=None, mode="or")
+    assert {r.name for r in results} == {"a.txt", "b.txt", "c.txt"}
+
+
+def test_empty_tag_list_in_or_mode_still_returns_all_live_files(index: TagIndex):
+    results = index.query(tags=[], mode="or")
+    assert {r.name for r in results} == {"a.txt", "b.txt", "c.txt"}

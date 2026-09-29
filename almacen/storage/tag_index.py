@@ -15,6 +15,11 @@ class TagIndex:
 
     def query(self, tags: list[str] | None, mode: Mode = "and") -> list[FileRecord]:
         live = self._metadata_store.list_live()
+        # Required for correctness, not just a shortcut: with no query tags the
+        # "or" predicate below would be `set() & record.tags`, i.e. empty for
+        # every record, so an unfiltered request would return nothing instead of
+        # every live file. ("and" would survive, since `set() <= record.tags`
+        # holds vacuously.)
         if not tags:
             return live
 
