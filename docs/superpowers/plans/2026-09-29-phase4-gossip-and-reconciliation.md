@@ -46,7 +46,20 @@ The spec names the mechanisms; these mechanics are open, and two of them were se
 
 7. **Blob catch-up is driven by placement, not by "fetch everything I lack".** After merging records, a node fetches a blob only if HRW says it is a replica for that content and it does not hold it. Fetching everything would make each node store the whole corpus and quietly undo Phase 2's sharding.
 
-8. **A dead node is still gossiped to, occasionally.** Peer selection prefers live peers but is not restricted to them, or a node wrongly marked dead could never be discovered alive again — the failure detector would be a one-way door.
+8. **`Membership` guards its view with a lock.** It is mutated by the gossip
+   thread (`record_reachable` / `record_unreachable`) and, at the same time,
+   read and merged by gRPC worker threads serving `Gossip` from peers. `merge`
+   and `record_unreachable` both read a peer's current status, decide, and then
+   write — a read-modify-write that two threads can interleave, with the second
+   write overwriting the first's decision. The consequence is losing a
+   suspicion or, worse, a refutation. The lock is uncontended in practice (a
+   handful of entries, microseconds per operation), so the cheap fix is the
+   right one. **No network call and no store call is ever made while it is
+   held**, so it cannot participate in a lock-ordering cycle with
+   `MetadataStore`'s lock — the same discipline `ReplicatedMetadataStore`
+   already follows.
+
+9. **A dead node is still gossiped to, occasionally.** Peer selection prefers live peers but is not restricted to them, or a node wrongly marked dead could never be discovered alive again — the failure detector would be a one-way door.
 
 ---
 
@@ -230,6 +243,7 @@ real time.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import IntEnum
@@ -265,6 +279,12 @@ class Membership:
             for peer in peers
             if peer != node_id
         }
+        # The gossip thread mutates this view while gRPC workers read and merge
+        # into it. Both paths read a peer's status, decide, then write, so two
+        # threads can interleave and the second write can discard the first's
+        # decision — losing a suspicion, or a refutation. Never held across a
+        # network or store call, so it cannot deadlock against the store lock.
+        self._lock = threading.RLock()
 
     # ---- direct observation ----
 
@@ -349,8 +369,47 @@ class Membership:
             self._incarnation = max(self._incarnation, claim.incarnation) + 1
 ```
 
-- [ ] **Step 4: Run tests** — expect 13 passed.
-- [ ] **Step 5: Commit** — `git commit -m "Add SWIM-style membership with refutable suspicion"`
+**Wrap every public method's body in `with self._lock:`** — `record_reachable`,
+`record_unreachable`, `state_of`, `live_peers`, `snapshot` and `merge`. An
+`RLock` rather than a `Lock` because `snapshot` and `live_peers` both call
+`state_of`, which would deadlock on a non-reentrant lock. `_refute` is called
+only from inside `merge`, so it must not take the lock again — but with an
+`RLock` it would be harmless either way.
+
+- [ ] **Step 4: Add a concurrency test**
+
+```python
+def test_concurrent_merges_do_not_lose_an_update():
+    """The gossip thread and a gRPC worker can merge at the same time.
+
+    Both paths read a peer's status, decide, then write. Without a lock the
+    second write can discard the first's decision — dropping a suspicion, or a
+    refutation, with no error.
+    """
+    import threading
+
+    membership = make("node1")
+    peers = [f"peer{i}" for i in range(16)]
+    ready = threading.Barrier(len(peers))
+
+    def report(peer: str):
+        def run() -> None:
+            ready.wait(timeout=5)
+            membership.merge({peer: NodeStatus(NodeState.SUSPECT, 3, T0)}, T0)
+
+        return run
+
+    threads = [threading.Thread(target=report(p)) for p in peers]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(membership.state_of(p, T0) is NodeState.SUSPECT for p in peers)
+```
+
+- [ ] **Step 5: Run tests** — expect 14 passed.
+- [ ] **Step 6: Commit** — `git commit -m "Add SWIM-style membership with refutable suspicion"`
 
 ---
 
