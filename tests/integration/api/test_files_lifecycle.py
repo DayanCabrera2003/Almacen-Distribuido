@@ -69,3 +69,83 @@ def test_delete_tombstones_and_all_endpoints_then_404(client: TestClient):
     assert client.get(f"/files/{file_id}").status_code == 404
     assert client.patch(f"/files/{file_id}", data={"name": "x"}).status_code == 404
     assert client.delete(f"/files/{file_id}").status_code == 404
+
+
+def test_list_with_and_mode_returns_intersection(client: TestClient):
+    client.post(
+        "/files",
+        files={"file": ("a.txt", b"a", "text/plain")},
+        data={"name": "a.txt", "tags": "invoice,draft"},
+    )
+    client.post(
+        "/files",
+        files={"file": ("b.txt", b"b", "text/plain")},
+        data={"name": "b.txt", "tags": "invoice"},
+    )
+
+    response = client.get("/files", params={"tags": "invoice,draft", "mode": "and"})
+
+    assert response.status_code == 200
+    assert [f["name"] for f in response.json()] == ["a.txt"]
+
+
+def test_list_with_or_mode_returns_union(client: TestClient):
+    client.post(
+        "/files",
+        files={"file": ("a.txt", b"a", "text/plain")},
+        data={"name": "a.txt", "tags": "x"},
+    )
+    client.post(
+        "/files",
+        files={"file": ("b.txt", b"b", "text/plain")},
+        data={"name": "b.txt", "tags": "y"},
+    )
+
+    response = client.get("/files", params={"tags": "x,y", "mode": "or"})
+
+    assert {f["name"] for f in response.json()} == {"a.txt", "b.txt"}
+
+
+def test_list_with_no_tags_returns_all_live_files(client: TestClient):
+    client.post(
+        "/files",
+        files={"file": ("a.txt", b"a", "text/plain")},
+        data={"name": "a.txt"},
+    )
+
+    response = client.get("/files")
+
+    assert response.status_code == 200
+    assert [f["name"] for f in response.json()] == ["a.txt"]
+
+
+def test_list_excludes_deleted_files(client: TestClient):
+    upload = client.post(
+        "/files",
+        files={"file": ("a.txt", b"a", "text/plain")},
+        data={"name": "a.txt", "tags": "x"},
+    )
+    file_id = upload.json()["file_id"]
+    client.delete(f"/files/{file_id}")
+
+    response = client.get("/files", params={"tags": "x"})
+
+    assert response.json() == []
+
+
+def test_list_rejects_invalid_mode(client: TestClient):
+    response = client.get("/files", params={"tags": "x", "mode": "xor"})
+    assert response.status_code == 400
+
+
+def test_list_ignores_invalid_mode_when_no_tags_given(client: TestClient):
+    client.post(
+        "/files",
+        files={"file": ("a.txt", b"a", "text/plain")},
+        data={"name": "a.txt"},
+    )
+
+    response = client.get("/files", params={"mode": "xor"})
+
+    assert response.status_code == 200
+    assert [f["name"] for f in response.json()] == ["a.txt"]

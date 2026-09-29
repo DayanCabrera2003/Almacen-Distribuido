@@ -1,18 +1,24 @@
 # almacen/api/routers/files.py
-"""REST endpoints for file upload, download, update, and delete."""
+"""REST endpoints for file upload, download, listing, update, and delete."""
 from __future__ import annotations
 
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
-from almacen.api.deps import get_blob_store, get_live_record, get_metadata_store
+from almacen.api.deps import (
+    get_blob_store,
+    get_live_record,
+    get_metadata_store,
+    get_tag_index,
+)
 from almacen.api.schemas import FileMetadata, to_file_metadata
 from almacen.domain.file_record import FileRecord
 from almacen.storage.blob_store import BlobStore
 from almacen.storage.metadata_store import MetadataStore
+from almacen.storage.tag_index import TagIndex
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -40,6 +46,21 @@ async def upload_file(
     )
     metadata_store.insert(record)
     return to_file_metadata(record)
+
+
+@router.get("", response_model=list[FileMetadata])
+def list_files(
+    tags: str | None = None,
+    mode: str = "and",
+    tag_index: TagIndex = Depends(get_tag_index),
+) -> list[FileMetadata]:
+    tag_list = list(_parse_tags(tags)) if tags else None
+    # mode only applies when tags are given, so a tags-less request with a bogus
+    # `mode` still succeeds instead of failing on an argument it never uses.
+    if tag_list and mode not in ("and", "or"):
+        raise HTTPException(status_code=400, detail="mode must be 'and' or 'or'")
+    records = tag_index.query(tag_list, mode=mode)  # type: ignore[arg-type]
+    return [to_file_metadata(record) for record in records]
 
 
 @router.get("/{file_id}")
