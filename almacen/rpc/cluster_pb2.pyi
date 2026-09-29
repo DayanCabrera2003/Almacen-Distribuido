@@ -74,3 +74,50 @@ class PingResponse(_message.Message):
     NODE_ID_FIELD_NUMBER: _ClassVar[int]
     node_id: str
     def __init__(self, node_id: _Optional[str] = ...) -> None: ...
+
+class DigestEntry(_message.Message):
+    __slots__ = ("file_id", "vector_clock")
+    class VectorClockEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: int
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[int] = ...) -> None: ...
+    FILE_ID_FIELD_NUMBER: _ClassVar[int]
+    VECTOR_CLOCK_FIELD_NUMBER: _ClassVar[int]
+    file_id: str
+    vector_clock: _containers.ScalarMap[str, int]
+    def __init__(self, file_id: _Optional[str] = ..., vector_clock: _Optional[_Mapping[str, int]] = ...) -> None: ...
+
+class MemberStatus(_message.Message):
+    __slots__ = ("node_id", "state", "incarnation", "since")
+    NODE_ID_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    INCARNATION_FIELD_NUMBER: _ClassVar[int]
+    SINCE_FIELD_NUMBER: _ClassVar[int]
+    node_id: str
+    state: int
+    incarnation: int
+    since: str
+    def __init__(self, node_id: _Optional[str] = ..., state: _Optional[int] = ..., incarnation: _Optional[int] = ..., since: _Optional[str] = ...) -> None: ...
+
+class GossipDigest(_message.Message):
+    __slots__ = ("from_node_id", "entries", "membership")
+    FROM_NODE_ID_FIELD_NUMBER: _ClassVar[int]
+    ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    MEMBERSHIP_FIELD_NUMBER: _ClassVar[int]
+    from_node_id: str
+    entries: _containers.RepeatedCompositeFieldContainer[DigestEntry]
+    membership: _containers.RepeatedCompositeFieldContainer[MemberStatus]
+    def __init__(self, from_node_id: _Optional[str] = ..., entries: _Optional[_Iterable[_Union[DigestEntry, _Mapping]]] = ..., membership: _Optional[_Iterable[_Union[MemberStatus, _Mapping]]] = ...) -> None: ...
+
+class GossipDelta(_message.Message):
+    __slots__ = ("records", "wanted_file_ids", "membership")
+    RECORDS_FIELD_NUMBER: _ClassVar[int]
+    WANTED_FILE_IDS_FIELD_NUMBER: _ClassVar[int]
+    MEMBERSHIP_FIELD_NUMBER: _ClassVar[int]
+    records: _containers.RepeatedCompositeFieldContainer[FileRecordMsg]
+    wanted_file_ids: _containers.RepeatedScalarFieldContainer[str]
+    membership: _containers.RepeatedCompositeFieldContainer[MemberStatus]
+    def __init__(self, records: _Optional[_Iterable[_Union[FileRecordMsg, _Mapping]]] = ..., wanted_file_ids: _Optional[_Iterable[str]] = ..., membership: _Optional[_Iterable[_Union[MemberStatus, _Mapping]]] = ...) -> None: ...

@@ -9,6 +9,9 @@ service Cluster {
   // fast path.
   rpc ReplicateRecord(FileRecordMsg) returns (ReplicateAck);
   rpc Ping(PingRequest) returns (PingResponse);
+  // Push-pull anti-entropy: the caller advertises what it has, the
+  // responder replies with what it should send and what it wants back.
+  rpc Gossip(GossipDigest) returns (GossipDelta);
 }
 
 // One occurrence of a tag in the OR-Set. The node_id and counter are what make
@@ -52,4 +55,34 @@ message PingRequest {
 
 message PingResponse {
   string node_id = 1;
+}
+
+// One entry of an anti-entropy digest: a file and the causal history the
+// advertising node has for it. Clocks are small, so a digest stays cheap even
+// when the records themselves are not.
+message DigestEntry {
+  string file_id = 1;
+  map<string, int64> vector_clock = 2;
+}
+
+message MemberStatus {
+  string node_id = 1;
+  // Mirrors NodeState: 0 alive, 1 suspect, 2 dead.
+  int32 state = 2;
+  int64 incarnation = 3;
+  string since = 4;  // ISO-8601
+}
+
+message GossipDigest {
+  string from_node_id = 1;
+  repeated DigestEntry entries = 2;
+  repeated MemberStatus membership = 3;
+}
+
+message GossipDelta {
+  // Records the responder is ahead on, or that the caller has never seen.
+  repeated FileRecordMsg records = 1;
+  // file_ids the responder is behind on, or has never seen.
+  repeated string wanted_file_ids = 2;
+  repeated MemberStatus membership = 3;
 }

@@ -44,6 +44,11 @@ class ClusterStub:
                 request_serializer=almacen_dot_rpc_dot_cluster__pb2.PingRequest.SerializeToString,
                 response_deserializer=almacen_dot_rpc_dot_cluster__pb2.PingResponse.FromString,
                 _registered_method=True)
+        self.Gossip = channel.unary_unary(
+                '/almacen.Cluster/Gossip',
+                request_serializer=almacen_dot_rpc_dot_cluster__pb2.GossipDigest.SerializeToString,
+                response_deserializer=almacen_dot_rpc_dot_cluster__pb2.GossipDelta.FromString,
+                _registered_method=True)
 
 
 class ClusterServicer:
@@ -64,6 +69,14 @@ class ClusterServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Gossip(self, request, context):
+        """Push-pull anti-entropy: the caller advertises what it has, the
+        responder replies with what it should send and what it wants back.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ClusterServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -76,6 +89,11 @@ def add_ClusterServicer_to_server(servicer, server):
                     servicer.Ping,
                     request_deserializer=almacen_dot_rpc_dot_cluster__pb2.PingRequest.FromString,
                     response_serializer=almacen_dot_rpc_dot_cluster__pb2.PingResponse.SerializeToString,
+            ),
+            'Gossip': grpc.unary_unary_rpc_method_handler(
+                    servicer.Gossip,
+                    request_deserializer=almacen_dot_rpc_dot_cluster__pb2.GossipDigest.FromString,
+                    response_serializer=almacen_dot_rpc_dot_cluster__pb2.GossipDelta.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -132,6 +150,33 @@ class Cluster:
             '/almacen.Cluster/Ping',
             almacen_dot_rpc_dot_cluster__pb2.PingRequest.SerializeToString,
             almacen_dot_rpc_dot_cluster__pb2.PingResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Gossip(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almacen.Cluster/Gossip',
+            almacen_dot_rpc_dot_cluster__pb2.GossipDigest.SerializeToString,
+            almacen_dot_rpc_dot_cluster__pb2.GossipDelta.FromString,
             options,
             channel_credentials,
             insecure,
