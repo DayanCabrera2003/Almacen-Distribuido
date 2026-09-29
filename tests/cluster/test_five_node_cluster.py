@@ -39,6 +39,10 @@ def cluster(tmp_path: Path) -> Iterator[dict[str, TestClient]]:
                 peers=peers,
                 replication_factor=3,
                 write_quorum=2,
+                # No background gossip: these tests drive replication through
+                # the API directly, and five real gossip threads on a real
+                # clock would make the suite's timing part of its behaviour.
+                gossip_interval_seconds=0,
             )
             # Entering the TestClient context runs the lifespan, which starts the
             # node's real gRPC server.

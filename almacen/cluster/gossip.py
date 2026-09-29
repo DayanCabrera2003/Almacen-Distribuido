@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import random
+import threading
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 
 import grpc
 
@@ -125,3 +127,112 @@ def catch_up_blobs(
             fetched += 1
             logger.info("caught up blob %s", record.content_hash[:12])
     return fetched
+
+
+class GossipLoop:
+    """Runs gossip rounds on a timer until stopped.
+
+    Deliberately thin: it owns the clock and the peer choice and nothing else.
+    All the protocol lives in `membership.py` and `reconciliation.py`, which take
+    time and peers as parameters — which is why none of this phase's tests need
+    to sleep.
+    """
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        store: MetadataStore,
+        blob_store: BlobStore,
+        membership: Membership,
+        channels: ChannelPool,
+        replication_client: ReplicationClient,
+        choose_peers: Callable[[datetime], list[Peer]] | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._settings = settings
+        self._store = store
+        self._blob_store = blob_store
+        self._membership = membership
+        self._channels = channels
+        self._replication_client = replication_client
+        # Injected in tests. Random selection needs up to 23 rounds to converge
+        # five nodes, so a test using it would be flaky at any round count fast
+        # enough to be worth running.
+        self._choose_peers = choose_peers or self._random_live_peers
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _random_live_peers(self, now: datetime) -> list[Peer]:
+        live = set(self._membership.live_peers(now))
+        candidates = [p for p in self._settings.remote_peers if p.node_id in live]
+        if not candidates:
+            return []
+        return random.sample(candidates, min(self._settings.gossip_fanout, len(candidates)))
+
+    def run_once(self) -> None:
+        """One tick: gossip with the chosen peers, then catch up on blobs."""
+        now = self._now()
+        for peer in self._choose_peers(now):
+            if self._stop.is_set():
+                # Re-checked between peers so a shutdown during a fanout does
+                # not have to wait out every peer's timeout.
+                return
+            try:
+                gossip_once(
+                    peer,
+                    settings=self._settings,
+                    store=self._store,
+                    membership=self._membership,
+                    channels=self._channels,
+                    now=now,
+                )
+            except Exception:  # noqa: BLE001 - nothing may escape the thread
+                # gossip_once already handles the expected failures; this is the
+                # backstop for the unexpected. One bad peer must not end the
+                # loop, and an escaped exception would do exactly that.
+                logger.exception("unexpected failure gossiping with %s", peer.node_id)
+
+        if self._stop.is_set():
+            return
+        try:
+            catch_up_blobs(
+                settings=self._settings,
+                store=self._store,
+                blob_store=self._blob_store,
+                replication_client=self._replication_client,
+                budget=self._settings.blob_catchup_budget,
+                should_stop=self._stop.is_set,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("unexpected failure catching up blobs")
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("gossip loop already started")
+        self._thread = threading.Thread(
+            target=self._run, name="gossip", daemon=True
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        # Waits before the first tick rather than after. Ticking at startup
+        # would make every app construction do a round of network I/O before
+        # anything asked it to.
+        while not self._stop.wait(self._settings.gossip_interval_seconds):
+            self.run_once()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Signal the thread and wait for it, raising if it does not finish.
+
+        Returning silently on a failed join is how a leaked thread becomes a
+        failure attributed to whatever test runs next.
+        """
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is None:
+            return
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            raise RuntimeError(f"gossip loop did not stop within {timeout}s")

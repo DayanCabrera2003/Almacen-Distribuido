@@ -22,6 +22,7 @@ def client_with_dead_peers(tmp_path: Path) -> TestClient:
         ),
         replication_factor=3,
         write_quorum=2,
+        gossip_interval_seconds=0,
     )
     # No lifespan: this node's own gRPC server is irrelevant here, and not
     # binding it keeps the test independent of port availability.

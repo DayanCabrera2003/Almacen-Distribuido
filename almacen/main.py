@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import FastAPI
 
 from almacen.api.routers import files as files_router
 from almacen.api.routers import tags as tags_router
 from almacen.cluster.channels import ChannelPool
+from almacen.cluster.gossip import GossipLoop
+from almacen.cluster.membership import Membership
 from almacen.cluster.metadata_replicator import MetadataReplicator
 from almacen.cluster.replicated_metadata_store import ReplicatedMetadataStore
 from almacen.cluster.replication_client import ReplicationClient
@@ -39,10 +42,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # peers must not be pushed straight back out.
         metadata_store=app.state.local_metadata_store,
         node_id=settings.node_id,
+        membership=app.state.membership,
         port=settings.grpc_port,
     )
     server.start()
     app.state.grpc_server = server
+
+    # Started after the gRPC server so the node is reachable for the whole time
+    # it is gossiping, and stopped before it for the same reason.
+    if app.state.gossip_loop is not None:
+        app.state.gossip_loop.start()
+
     logger.info(
         "node %s serving gRPC on port %s, peers: %s",
         settings.node_id,
@@ -52,6 +62,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Gossip first: a round in flight would otherwise keep using the server
+        # and the channels that the next two lines tear down.
+        if app.state.gossip_loop is not None:
+            app.state.gossip_loop.stop()
         server.stop(GRPC_SHUTDOWN_GRACE_SECONDS).wait()
         # The pool is shared by both cluster clients, so it is closed here by its
         # owner rather than by either of them.
@@ -79,6 +93,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     # Queries read the local replica directly; there is nothing to replicate.
     app.state.tag_index = TagIndex(local_metadata_store)
+
+    # One Membership instance, shared by the servicer and the loop. Two would
+    # each hold half the picture and neither would see the other's observations.
+    membership = Membership(
+        node_id=settings.node_id,
+        peers=tuple(settings.node_ids),
+        suspicion_timeout=timedelta(seconds=settings.suspicion_timeout_seconds),
+    )
+    app.state.membership = membership
+    # Disabled by a non-positive interval. That is what keeps the test suite's
+    # multi-node fixtures from starting real gossip threads on a real clock.
+    app.state.gossip_loop = (
+        GossipLoop(
+            settings=settings,
+            store=local_metadata_store,
+            blob_store=blob_store,
+            membership=membership,
+            channels=channels,
+            replication_client=app.state.replication_client,
+        )
+        if settings.gossip_enabled
+        else None
+    )
 
     app.include_router(files_router.router)
     app.include_router(tags_router.router)
