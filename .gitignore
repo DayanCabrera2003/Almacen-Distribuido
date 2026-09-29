@@ -27,3 +27,6 @@ venv/
 
 # Local node data (blobs + metadata db)
 data/
+
+# DAA notes live in the project root, outside this repo
+DAA/
