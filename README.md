@@ -7,12 +7,31 @@ brief.
 
 ## Status
 
-Phase 2 (static cluster) — a fixed set of nodes replicate content and metadata.
+Phase 3 (CRDTs and concurrency) — concurrent edits made on different nodes now
+converge instead of clobbering each other.
+
 Content is stored on R=3 of N=5 nodes chosen by rendezvous hashing, acknowledged
 after W=2 replicas confirm. Metadata is replicated in full to every node, so any
-node answers any query. No failure handling yet: membership is static (no
-gossip), and concurrent conflicting writes are resolved by arrival order rather
-than CRDT merge. Those are Phases 3 and 4.
+node answers any query, and metadata is merged rather than overwritten:
+
+- **tags** are an observed-remove set, so a tag added on one node survives a
+  concurrent removal on another;
+- **name**, **content pointer** and **tombstone** are last-writer-wins registers
+  with a `(timestamp, node_id)` tie-break, so every node picks the same winner;
+- a **vector clock** per record separates a causally stale update (discarded
+  quietly) from a genuinely concurrent one (resolved by last-writer-wins and
+  logged with both clocks).
+
+Still missing: membership is static and updates only move by direct push, so a
+node that misses one stays behind until something re-sends — gossip and
+anti-entropy are Phase 4. Tombstones are never purged and orphaned blobs are
+never reclaimed, which is Phase 5.
+
+### Upgrading from Phase 2
+
+The metadata schema changed incompatibly to store the CRDT state, and no
+migration is provided: a node's `ALMACEN_DATA_DIR` must be empty before it
+starts. `docker compose ... down -v` removes the volumes.
 
 ## Setup
 
@@ -103,6 +122,7 @@ Notes:
       config.py          # node Settings: storage paths + static cluster membership
       main.py            # FastAPI app factory; lifespan runs the gRPC server
       domain/            # FileRecord entity, no I/O
+      crdt/              # OrSet, LWWRegister, VectorClock — pure, no I/O
       storage/           # BlobStore (filesystem), MetadataStore (SQLite), TagIndex
       rpc/               # node-to-node gRPC: protos, generated stubs, servicers
       cluster/           # placement (HRW), replication client, metadata replication
@@ -110,6 +130,6 @@ Notes:
     docker/              # Dockerfile + five-node Compose cluster
     scripts/             # gen_protos.sh
     tests/
-      unit/              # domain, config, placement, codec — no I/O
+      unit/              # crdt, domain, config, placement, codec — no I/O
       integration/       # storage, rpc, cluster, API
       cluster/           # five-node end-to-end
