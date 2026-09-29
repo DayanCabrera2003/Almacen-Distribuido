@@ -1,0 +1,61 @@
+# docker/docker-compose.yml
+name: almacen
+
+x-node: &node
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  environment: &node-env
+    ALMACEN_DATA_DIR: /data
+    ALMACEN_GRPC_PORT: "50051"
+    ALMACEN_REPLICATION_FACTOR: "3"
+    ALMACEN_WRITE_QUORUM: "2"
+    ALMACEN_PEERS: "node1@node1:50051,node2@node2:50051,node3@node3:50051,node4@node4:50051,node5@node5:50051"
+
+services:
+  node1:
+    <<: *node
+    environment:
+      <<: *node-env
+      ALMACEN_NODE_ID: node1
+    ports: ["8001:8000"]
+    volumes: ["node1-data:/data"]
+
+  node2:
+    <<: *node
+    environment:
+      <<: *node-env
+      ALMACEN_NODE_ID: node2
+    ports: ["8002:8000"]
+    volumes: ["node2-data:/data"]
+
+  node3:
+    <<: *node
+    environment:
+      <<: *node-env
+      ALMACEN_NODE_ID: node3
+    ports: ["8003:8000"]
+    volumes: ["node3-data:/data"]
+
+  node4:
+    <<: *node
+    environment:
+      <<: *node-env
+      ALMACEN_NODE_ID: node4
+    ports: ["8004:8000"]
+    volumes: ["node4-data:/data"]
+
+  node5:
+    <<: *node
+    environment:
+      <<: *node-env
+      ALMACEN_NODE_ID: node5
+    ports: ["8005:8000"]
+    volumes: ["node5-data:/data"]
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:
