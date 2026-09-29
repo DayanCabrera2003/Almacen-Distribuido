@@ -84,3 +84,43 @@ def test_rejects_a_non_positive_rpc_timeout():
         Settings(
             data_dir=Path("/tmp/b"), db_path=Path("/tmp/m.db"), rpc_timeout_seconds=0
         )
+
+
+def test_gossip_settings_have_defaults_and_read_the_environment(monkeypatch):
+    defaults = Settings(data_dir=Path("/tmp/b"), db_path=Path("/tmp/m.db"))
+    assert defaults.gossip_interval_seconds == 5.0
+    assert defaults.suspicion_timeout_seconds == 15.0
+    assert defaults.gossip_fanout == 2
+    assert defaults.blob_catchup_budget == 8
+    assert defaults.gossip_enabled is True
+
+    monkeypatch.setenv("ALMACEN_GOSSIP_INTERVAL_SECONDS", "2")
+    monkeypatch.setenv("ALMACEN_SUSPICION_TIMEOUT_SECONDS", "6")
+    monkeypatch.setenv("ALMACEN_GOSSIP_FANOUT", "3")
+    monkeypatch.setenv("ALMACEN_BLOB_CATCHUP_BUDGET", "4")
+    from_env = Settings.from_env()
+    assert from_env.gossip_interval_seconds == 2.0
+    assert from_env.suspicion_timeout_seconds == 6.0
+    assert from_env.gossip_fanout == 3
+    assert from_env.blob_catchup_budget == 4
+
+
+def test_a_non_positive_gossip_interval_disables_the_loop():
+    # Not a convenience: every multi-node fixture relies on it to avoid starting
+    # real gossip threads inside the test suite.
+    settings = Settings(
+        data_dir=Path("/tmp/b"), db_path=Path("/tmp/m.db"), gossip_interval_seconds=0
+    )
+    assert settings.gossip_enabled is False
+
+
+def test_rejects_non_positive_gossip_parameters():
+    for field, value in (
+        ("suspicion_timeout_seconds", 0),
+        ("gossip_fanout", 0),
+        ("blob_catchup_budget", 0),
+    ):
+        with pytest.raises(ValueError, match=field):
+            Settings(
+                data_dir=Path("/tmp/b"), db_path=Path("/tmp/m.db"), **{field: value}
+            )

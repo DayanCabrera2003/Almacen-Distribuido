@@ -151,6 +151,17 @@ class MetadataStore:
             ).fetchall()
             return [self._row_to_record(row) for row in rows]
 
+    def list_all(self) -> list[FileRecord]:
+        """Every record, tombstoned or not.
+
+        Anti-entropy uses this rather than `list_live`: a tombstone is an update
+        like any other, and a peer that never receives it goes on serving a file
+        the rest of the cluster considers deleted.
+        """
+        with self._lock:
+            rows = self._conn.execute(f"SELECT {_COLUMNS} FROM files").fetchall()
+            return [self._row_to_record(row) for row in rows]
+
     def close(self) -> None:
         """Release the SQLite connection.
 

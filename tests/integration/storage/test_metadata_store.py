@@ -114,3 +114,17 @@ def test_list_live_excludes_tombstoned_records(store: MetadataStore):
     results = store.list_live()
 
     assert {r.file_id for r in results} == {live.file_id}
+
+
+def test_list_all_includes_tombstoned_records(tmp_path: Path):
+    # Anti-entropy needs them: a tombstone that never propagates leaves a peer
+    # serving a file the rest of the cluster considers deleted.
+    store = MetadataStore(tmp_path / "m.db")
+    live = FileRecord.new(name="live.txt", content_hash="h1", node_id="node1")
+    deleted = FileRecord.new(name="gone.txt", content_hash="h2", node_id="node1")
+    deleted.mark_deleted("node1")
+    store.insert(live)
+    store.insert(deleted)
+
+    assert {r.file_id for r in store.list_all()} == {live.file_id, deleted.file_id}
+    assert [r.file_id for r in store.list_live()] == [live.file_id]

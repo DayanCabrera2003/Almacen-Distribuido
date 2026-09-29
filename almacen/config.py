@@ -11,6 +11,10 @@ DEFAULT_NODE_ID = "node1"
 # Ceiling on how long one replicated write waits on an unresponsive peer, and
 # therefore on how long a client request can take when a peer is black-holed.
 DEFAULT_RPC_TIMEOUT_SECONDS = 5.0
+DEFAULT_GOSSIP_INTERVAL_SECONDS = 5.0
+DEFAULT_SUSPICION_TIMEOUT_SECONDS = 15.0
+DEFAULT_GOSSIP_FANOUT = 2
+DEFAULT_BLOB_CATCHUP_BUDGET = 8
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,14 @@ class Settings:
     replication_factor: int = 3
     write_quorum: int = 2
     rpc_timeout_seconds: float = DEFAULT_RPC_TIMEOUT_SECONDS
+    # Zero or less disables the background gossip loop entirely. That is
+    # load-bearing, not a convenience: without it every multi-node test fixture
+    # would start real gossip threads on a real clock, and teardown would block
+    # on rounds already in flight against servers that have stopped.
+    gossip_interval_seconds: float = DEFAULT_GOSSIP_INTERVAL_SECONDS
+    suspicion_timeout_seconds: float = DEFAULT_SUSPICION_TIMEOUT_SECONDS
+    gossip_fanout: int = DEFAULT_GOSSIP_FANOUT
+    blob_catchup_budget: int = DEFAULT_BLOB_CATCHUP_BUDGET
 
     def __post_init__(self) -> None:
         if self.replication_factor < 1:
@@ -55,6 +67,17 @@ class Settings:
             raise ValueError(
                 f"rpc_timeout_seconds must be > 0, got {self.rpc_timeout_seconds}"
             )
+        if self.suspicion_timeout_seconds <= 0:
+            raise ValueError(
+                "suspicion_timeout_seconds must be > 0, got "
+                f"{self.suspicion_timeout_seconds}"
+            )
+        if self.gossip_fanout < 1:
+            raise ValueError(f"gossip_fanout must be >= 1, got {self.gossip_fanout}")
+        if self.blob_catchup_budget < 1:
+            raise ValueError(
+                f"blob_catchup_budget must be >= 1, got {self.blob_catchup_budget}"
+            )
         if self.write_quorum > self.replication_factor:
             raise ValueError(
                 f"write_quorum ({self.write_quorum}) cannot exceed "
@@ -65,6 +88,10 @@ class Settings:
                 f"node_id {self.node_id!r} does not appear in the peer list "
                 f"{[p.node_id for p in self.peers]}"
             )
+
+    @property
+    def gossip_enabled(self) -> bool:
+        return self.gossip_interval_seconds > 0
 
     @property
     def node_ids(self) -> list[str]:
@@ -99,5 +126,24 @@ class Settings:
             write_quorum=int(os.environ.get("ALMACEN_WRITE_QUORUM", 2)),
             rpc_timeout_seconds=float(
                 os.environ.get("ALMACEN_RPC_TIMEOUT_SECONDS", DEFAULT_RPC_TIMEOUT_SECONDS)
+            ),
+            gossip_interval_seconds=float(
+                os.environ.get(
+                    "ALMACEN_GOSSIP_INTERVAL_SECONDS", DEFAULT_GOSSIP_INTERVAL_SECONDS
+                )
+            ),
+            suspicion_timeout_seconds=float(
+                os.environ.get(
+                    "ALMACEN_SUSPICION_TIMEOUT_SECONDS",
+                    DEFAULT_SUSPICION_TIMEOUT_SECONDS,
+                )
+            ),
+            gossip_fanout=int(
+                os.environ.get("ALMACEN_GOSSIP_FANOUT", DEFAULT_GOSSIP_FANOUT)
+            ),
+            blob_catchup_budget=int(
+                os.environ.get(
+                    "ALMACEN_BLOB_CATCHUP_BUDGET", DEFAULT_BLOB_CATCHUP_BUDGET
+                )
             ),
         )
