@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -80,26 +81,65 @@ class MetadataStore:
             return self._row_to_record(row)
 
     def update(self, record: FileRecord) -> None:
+        """Write the record as given, replacing whatever is stored.
+
+        This is a blind write: it overwrites the stored tag set with the
+        caller's, so anything another writer changed since the caller read the
+        record is lost. Use `mutate` for read-modify-write on a live record;
+        this method is for callers that legitimately own the whole value, such
+        as applying a record received from a peer.
+        """
         with self._lock, self._conn:
-            self._conn.execute(
-                """
-                UPDATE files
-                SET name = ?, content_hash = ?, tombstone = ?, tombstone_at = ?, updated_at = ?
-                WHERE file_id = ?
-                """,
-                (
-                    record.name,
-                    record.content_hash,
-                    int(record.tombstone),
-                    _dt_to_str(record.tombstone_at),
-                    _dt_to_str(record.updated_at),
-                    str(record.file_id),
-                ),
-            )
-            self._conn.execute(
-                "DELETE FROM file_tags WHERE file_id = ?", (str(record.file_id),)
-            )
-            self._insert_tags(record.file_id, record.tags)
+            self._write(record)
+
+    def mutate(
+        self, file_id: uuid.UUID, mutator: Callable[[FileRecord], None]
+    ) -> FileRecord | None:
+        """Read, apply `mutator`, and write back, all under one lock.
+
+        Read-modify-write split across two calls loses updates: two callers read
+        the same tag set, each adds one tag, and the second write erases the
+        first's — a change this node already acknowledged. Holding the lock
+        across the whole sequence makes the operation atomic.
+
+        Returns the updated record, or None if the file does not exist. The lock
+        is not reentrant, so `mutator` must not call back into this store.
+        """
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT file_id, name, content_hash, tombstone, tombstone_at, created_at, updated_at "
+                "FROM files WHERE file_id = ?",
+                (str(file_id),),
+            ).fetchone()
+            if row is None:
+                return None
+
+            record = self._row_to_record(row)
+            mutator(record)
+            self._write(record)
+            return record
+
+    def _write(self, record: FileRecord) -> None:
+        """Persist a record's mutable fields. Caller must hold the lock."""
+        self._conn.execute(
+            """
+            UPDATE files
+            SET name = ?, content_hash = ?, tombstone = ?, tombstone_at = ?, updated_at = ?
+            WHERE file_id = ?
+            """,
+            (
+                record.name,
+                record.content_hash,
+                int(record.tombstone),
+                _dt_to_str(record.tombstone_at),
+                _dt_to_str(record.updated_at),
+                str(record.file_id),
+            ),
+        )
+        self._conn.execute(
+            "DELETE FROM file_tags WHERE file_id = ?", (str(record.file_id),)
+        )
+        self._insert_tags(record.file_id, record.tags)
 
     def upsert(self, record: FileRecord) -> None:
         """Insert the record, or replace it wholesale if it already exists.

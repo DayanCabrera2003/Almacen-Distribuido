@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 
 from almacen.cluster.metadata_replicator import MetadataReplicator
 from almacen.domain.file_record import FileRecord
@@ -34,6 +35,16 @@ class ReplicatedMetadataStore:
     def update(self, record: FileRecord) -> None:
         self._local.update(record)
         self._replicator.replicate(record)
+
+    def mutate(
+        self, file_id: uuid.UUID, mutator: Callable[[FileRecord], None]
+    ) -> FileRecord | None:
+        record = self._local.mutate(file_id, mutator)
+        # A mutation that matched no file changed nothing, so there is nothing
+        # to replicate.
+        if record is not None:
+            self._replicator.replicate(record)
+        return record
 
     def get(self, file_id: uuid.UUID) -> FileRecord | None:
         return self._local.get(file_id)

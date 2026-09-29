@@ -14,6 +14,7 @@ from almacen.api.deps import (
     get_metadata_store,
     get_replication_client,
     get_tag_index,
+    mutate_live_record,
 )
 from almacen.api.schemas import FileMetadata, to_file_metadata
 from almacen.cluster.replication_client import QuorumNotReached, ReplicationClient
@@ -103,21 +104,31 @@ async def update_file(
     metadata_store: MetadataStoreLike = Depends(get_metadata_store),
     replication_client: ReplicationClient = Depends(get_replication_client),
 ) -> FileMetadata:
-    record = get_live_record(metadata_store, file_id)
-    if name is not None:
-        record.rename(name)
+    # Check the file exists before spending a replication round on its content.
+    get_live_record(metadata_store, file_id)
+
+    content_hash: str | None = None
     if file is not None:
         content = await file.read()
-        # Off the event loop, for the same reason as in upload_file.
+        # Replicate before mutating: this is network I/O, and it must not run
+        # while the metadata store's lock is held.
         try:
             content_hash = await run_in_threadpool(
                 replication_client.put_blob, content
             )
         except QuorumNotReached as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
-        record.update_content(content_hash)
-    await run_in_threadpool(metadata_store.update, record)
-    return to_file_metadata(record)
+
+    def apply(record: FileRecord) -> None:
+        if name is not None:
+            record.rename(name)
+        if content_hash is not None:
+            record.update_content(content_hash)
+
+    updated = await run_in_threadpool(
+        mutate_live_record, metadata_store, file_id, apply
+    )
+    return to_file_metadata(updated)
 
 
 @router.delete("/{file_id}", status_code=204)
@@ -125,6 +136,4 @@ def delete_file(
     file_id: uuid.UUID,
     metadata_store: MetadataStoreLike = Depends(get_metadata_store),
 ) -> None:
-    record = get_live_record(metadata_store, file_id)
-    record.mark_deleted()
-    metadata_store.update(record)
+    mutate_live_record(metadata_store, file_id, lambda record: record.mark_deleted())

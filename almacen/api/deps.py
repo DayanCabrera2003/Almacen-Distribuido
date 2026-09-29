@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 
 from fastapi import HTTPException, Request
 
@@ -38,3 +39,38 @@ def get_live_record(
     if record is None or record.tombstone:
         raise HTTPException(status_code=404, detail="file not found")
     return record
+
+
+class _RecordGone(Exception):
+    """Raised inside a mutator when the record turned out not to be live."""
+
+
+def mutate_live_record(
+    metadata_store: MetadataStoreLike,
+    file_id: uuid.UUID,
+    mutator: Callable[[FileRecord], None],
+) -> FileRecord:
+    """Apply `mutator` to a live record atomically, or raise 404.
+
+    Reading a record and writing it back in two separate calls loses concurrent
+    updates, because the write replaces the whole stored value from a snapshot
+    that may already be stale. Routing every read-modify-write through the
+    store's `mutate` keeps the sequence under one lock.
+
+    The liveness check happens *inside* the mutation, not before it, so a file
+    deleted between the check and the write cannot be resurrected.
+    """
+
+    def guarded(record: FileRecord) -> None:
+        if record.tombstone:
+            raise _RecordGone
+        mutator(record)
+
+    try:
+        updated = metadata_store.mutate(file_id, guarded)
+    except _RecordGone:
+        raise HTTPException(status_code=404, detail="file not found") from None
+
+    if updated is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    return updated
