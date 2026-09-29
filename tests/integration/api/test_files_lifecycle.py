@@ -149,3 +149,52 @@ def test_list_ignores_invalid_mode_when_no_tags_given(client: TestClient):
 
     assert response.status_code == 200
     assert [f["name"] for f in response.json()] == ["a.txt"]
+
+
+def test_add_list_and_remove_tags(client: TestClient):
+    upload = client.post(
+        "/files",
+        files={"file": ("a.txt", b"a", "text/plain")},
+        data={"name": "a.txt", "tags": "invoice"},
+    )
+    file_id = upload.json()["file_id"]
+
+    list_tags = client.get(f"/files/{file_id}/tags")
+    assert list_tags.status_code == 200
+    assert list_tags.json()["tags"] == ["invoice"]
+
+    add_tags = client.post(f"/files/{file_id}/tags", json={"tags": ["draft", "final"]})
+    assert add_tags.status_code == 200
+    assert sorted(add_tags.json()["tags"]) == ["draft", "final", "invoice"]
+
+    remove_tag = client.delete(f"/files/{file_id}/tags/draft")
+    assert remove_tag.status_code == 200
+    assert sorted(remove_tag.json()["tags"]) == ["final", "invoice"]
+
+
+def test_remove_absent_tag_is_a_noop_not_an_error(client: TestClient):
+    upload = client.post(
+        "/files",
+        files={"file": ("a.txt", b"a", "text/plain")},
+        data={"name": "a.txt"},
+    )
+    file_id = upload.json()["file_id"]
+
+    response = client.delete(f"/files/{file_id}/tags/nonexistent")
+
+    assert response.status_code == 200
+    assert response.json()["tags"] == []
+
+
+def test_tag_endpoints_404_on_deleted_file(client: TestClient):
+    upload = client.post(
+        "/files",
+        files={"file": ("a.txt", b"a", "text/plain")},
+        data={"name": "a.txt"},
+    )
+    file_id = upload.json()["file_id"]
+    client.delete(f"/files/{file_id}")
+
+    assert client.get(f"/files/{file_id}/tags").status_code == 404
+    assert client.post(f"/files/{file_id}/tags", json={"tags": ["x"]}).status_code == 404
+    assert client.delete(f"/files/{file_id}/tags/x").status_code == 404

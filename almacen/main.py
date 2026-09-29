@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from almacen.api.routers import files as files_router
+from almacen.api.routers import tags as tags_router
 from almacen.config import Settings
 from almacen.storage.blob_store import BlobStore
 from almacen.storage.metadata_store import MetadataStore
@@ -20,6 +21,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.tag_index = TagIndex(app.state.metadata_store)
 
     app.include_router(files_router.router)
+    app.include_router(tags_router.router)
 
     return app
 
