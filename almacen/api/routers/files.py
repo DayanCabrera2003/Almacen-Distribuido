@@ -7,6 +7,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
 
 from almacen.api.deps import (
     get_live_record,
@@ -38,8 +39,12 @@ async def upload_file(
     metadata_store: MetadataStoreLike = Depends(get_metadata_store),
 ) -> FileMetadata:
     content = await file.read()
+    # These handlers must stay `async def` to await UploadFile.read(), but
+    # put_blob and the metadata push are synchronous and can each take up to the
+    # gRPC deadline. Run them in a worker thread, or they would block the event
+    # loop and stall every other request this node is serving.
     try:
-        content_hash = replication_client.put_blob(content)
+        content_hash = await run_in_threadpool(replication_client.put_blob, content)
     except QuorumNotReached as error:
         # Recording metadata now would leave a file pointing at content that is
         # not durable, so nothing is written.
@@ -49,7 +54,7 @@ async def upload_file(
         content_hash=content_hash,
         tags=_parse_tags(tags),
     )
-    metadata_store.insert(record)
+    await run_in_threadpool(metadata_store.insert, record)
     return to_file_metadata(record)
 
 
@@ -103,12 +108,15 @@ async def update_file(
         record.rename(name)
     if file is not None:
         content = await file.read()
+        # Off the event loop, for the same reason as in upload_file.
         try:
-            content_hash = replication_client.put_blob(content)
+            content_hash = await run_in_threadpool(
+                replication_client.put_blob, content
+            )
         except QuorumNotReached as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         record.update_content(content_hash)
-    metadata_store.update(record)
+    await run_in_threadpool(metadata_store.update, record)
     return to_file_metadata(record)
 
 
