@@ -59,7 +59,7 @@ The spec names the mechanisms; these mechanics are open, and two of them were se
    `MetadataStore`'s lock — the same discipline `ReplicatedMetadataStore`
    already follows.
 
-9. **A dead node is still gossiped to, occasionally.** Peer selection prefers live peers but is not restricted to them, or a node wrongly marked dead could never be discovered alive again — the failure detector would be a one-way door.
+9. **Recovery is victim-initiated, and that is sufficient.** Peer selection uses `live_peers`, so a node believed dead is not gossiped to. That is not a one-way door: the wrongly-dead node is still running its own loop, and when it gossips outward it sees its own `DEAD` entry in the reply's membership and refutes it with a higher incarnation, which propagates normally. Stated explicitly because the alternative — occasionally probing dead peers — sounds necessary and is not, and because Task 9's "marked alive again" test needs to know which mechanism it exercises.
 
 ---
 
@@ -79,7 +79,10 @@ almacen/
 tests/
   unit/cluster/test_membership.py        # NEW
   unit/cluster/test_reconciliation.py    # NEW
-  integration/cluster/test_gossip.py     # NEW: one round over real gRPC
+  integration/rpc/test_gossip_servicer.py        # NEW
+  integration/cluster/test_gossip.py             # NEW: one round over real gRPC
+  integration/cluster/test_blob_catchup.py       # NEW
+  integration/cluster/test_gossip_loop.py        # NEW: the driver, no sleeping
   integration/cluster/test_partition_healing.py  # NEW: the headline tests
 docker/
   docker-compose.yml           # MODIFY: shorter timers for a live demo
@@ -357,7 +360,14 @@ class Membership:
                 mine.incarnation,
                 mine.state,
             ):
-                self._view[peer] = theirs
+                # Re-stamp with *our* clock. `since` is only ever compared
+                # against a local `now` in `state_of`, so adopting a remote
+                # machine's timestamp makes the suspicion deadline depend on
+                # that machine's clock: a peer running ahead yields entries
+                # that never age into DEAD, one running behind yields instant
+                # DEAD. Invisible in tests, where time is injected; very
+                # visible in Compose.
+                self._view[peer] = NodeStatus(theirs.state, theirs.incarnation, now)
 
     def _refute(self, claim: NodeStatus) -> None:
         """Someone thinks we are suspect or dead. Outrank them.
@@ -376,39 +386,69 @@ class Membership:
 only from inside `merge`, so it must not take the lock again — but with an
 `RLock` it would be harmless either way.
 
-- [ ] **Step 4: Add a concurrency test**
+- [ ] **Step 4: Add the concurrency test**
+
+Add `NodeStatus` to this module's imports (Step 1 imports only `Membership` and
+`NodeState`).
+
+The race worth testing is **not** two threads writing different peers: measured,
+16 threads inserting distinct keys lose nothing, because a single dict insert is
+already atomic under the GIL. A test built on that passes identically with and
+without the lock, which is worse than no test — it certifies the very thing it
+fails to check.
+
+The reachable race is a reader **iterating** the view while a merge inserts a
+peer it had never heard of. Measured on the unlocked version: 476
+`RuntimeError: dictionary changed size during iteration` in three seconds.
 
 ```python
-def test_concurrent_merges_do_not_lose_an_update():
-    """The gossip thread and a gRPC worker can merge at the same time.
+def test_a_snapshot_is_not_corrupted_by_a_concurrent_merge():
+    """The gossip thread merges while a gRPC worker builds a snapshot.
 
-    Both paths read a peer's status, decide, then write. Without a lock the
-    second write can discard the first's decision — dropping a suspicion, or a
-    refutation, with no error.
+    `snapshot` and `live_peers` iterate the view; `merge` can insert a peer the
+    node has never heard of. Unlocked, the reader raises
+    `RuntimeError: dictionary changed size during iteration` — hundreds of times
+    per second — and the gossip round dies with it.
     """
     import threading
+    import time
 
     membership = make("node1")
-    peers = [f"peer{i}" for i in range(16)]
-    ready = threading.Barrier(len(peers))
+    failures: list[str] = []
+    stop = threading.Event()
 
-    def report(peer: str):
-        def run() -> None:
-            ready.wait(timeout=5)
-            membership.merge({peer: NodeStatus(NodeState.SUSPECT, 3, T0)}, T0)
+    def merging() -> None:
+        index = 0
+        while not stop.is_set():
+            membership.merge(
+                {f"newcomer{index}": NodeStatus(NodeState.ALIVE, 1, T0)}, T0
+            )
+            index += 1
+            if index % 50 == 0:
+                time.sleep(0)  # yield, or the GIL starves the reader
 
-        return run
+    def reading() -> None:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                membership.snapshot(T0)
+                membership.live_peers(T0)
+            except RuntimeError as error:
+                failures.append(str(error))
 
-    threads = [threading.Thread(target=report(p)) for p in peers]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=10)
+    writer = threading.Thread(target=merging)
+    reader = threading.Thread(target=reading)
+    writer.start()
+    reader.start()
+    reader.join(timeout=10)
+    stop.set()
+    writer.join(timeout=5)
 
-    assert all(membership.state_of(p, T0) is NodeState.SUSPECT for p in peers)
+    assert failures == [], f"snapshot raced against merge: {failures[0]}"
 ```
 
-- [ ] **Step 5: Run tests** — expect 14 passed.
+- [ ] **Step 5: Run tests** — expect 14 passed. Confirm the test has teeth by
+removing `with self._lock:` from `snapshot` and `merge`: it must fail.
 - [ ] **Step 6: Commit** — `git commit -m "Add SWIM-style membership with refutable suspicion"`
 
 ---
@@ -623,6 +663,11 @@ Materialize it at the top if that ever becomes a footgun.
 
 ### Task 5: Gossip over gRPC
 
+> **Do Task 8 Step 1 (the new settings) first.** `main.py` must construct the
+> `Membership` that the servicer and the gossip loop share, and that needs
+> `suspicion_timeout_seconds`, which Task 8 adds. Building it here without that
+> setting means hardcoding a timeout and revisiting it one task later.
+
 **Files:** Modify `almacen/rpc/cluster.proto`, `almacen/rpc/cluster_servicer.py`, `almacen/storage/metadata_store.py`; test `tests/integration/rpc/test_gossip_servicer.py`
 
 - [ ] **Step 1: Add `MetadataStore.list_all`**
@@ -693,12 +738,44 @@ lacks produces it in `wanted_file_ids`; a newer remote clock produces `wanted`
 and no push; equal clocks produce an empty delta; and the membership snapshot
 travels in both directions.
 
-- [ ] **Step 5: Implement `Gossip` in `ClusterServicer`**, delegating the
-decision to `plan_exchange` and the membership merge to `Membership.merge`. The
-servicer holds a reference to the node's `Membership` — pass it in the
-constructor alongside the store, and update `build_server` accordingly.
+- [ ] **Step 5: Add the gossip codec**
 
-- [ ] **Step 6: Run tests, commit** — `git commit -m "Serve push-pull gossip over gRPC"`
+`GossipDigest` and `GossipDelta` carry three conversions that both the servicer
+and the client (Task 6) need, so they get one home —
+`almacen/rpc/gossip_codec.py`: `entries` ↔ `Digest`, and `membership` ↔
+`dict[str, NodeStatus]`.
+
+Protobuf's default for an unset `MemberStatus.since` is `""`, which
+`record_codec._parse` turns into `None`. A `NodeStatus` holding `None` for
+`since` raises inside `state_of`'s subtraction, so the decoder must reject an
+empty `since` rather than pass it through — the same trust-boundary reasoning as
+Phase 3's timezone check.
+
+- [ ] **Step 6: Implement `Gossip` in `ClusterServicer`**, delegating the
+decision to `plan_exchange` and the membership merge to `Membership.merge`. Have
+it also call `membership.record_reachable(request.from_node_id, now)`: the
+message itself proves the caller is up, which makes failure detection
+bidirectional for free and is the only use of `from_node_id`.
+
+The servicer takes the node's `Membership` in its constructor, so `build_server`
+grows a parameter too. **Seven call sites break** and must be updated in the same
+commit, or the suite goes red:
+
+```
+almacen/main.py:36                                       build_server(
+almacen/rpc/server.py:40                                 ClusterServicer(
+tests/integration/rpc/test_server.py:20                  build_server(
+tests/integration/rpc/test_cluster_servicer.py:23        ClusterServicer(
+tests/integration/cluster/test_convergence.py:41         build_server(
+tests/integration/cluster/test_replication_client.py:38  build_server(
+tests/integration/cluster/test_metadata_replication.py:28,137  build_server( / ClusterServicer(
+```
+
+`main.py` must construct one `Membership` and give the **same instance** to both
+the servicer and the `GossipLoop`. Two instances would each hold half the
+picture and neither would ever see the other's observations.
+
+- [ ] **Step 7: Run the whole suite, commit** — `git commit -m "Serve push-pull gossip over gRPC"`
 
 ---
 
@@ -731,24 +808,41 @@ def gossip_once(peer: Peer, *, settings, store, membership, channels, now) -> bo
         return False
 
     membership.record_reachable(peer.node_id, now)
-    membership.merge(_decode_membership(delta.membership), now)
 
-    # Pull: merge what the peer is ahead on.
-    for message in delta.records:
-        store.merge_remote(message_to_record(message))
+    # Everything below can fail too, and all of it runs on the background
+    # gossip thread. A decode error (ValueError from a malformed record or a bad
+    # uuid) or a peer that dies between answering the digest and receiving the
+    # pushes — the exact scenario this phase exists for — would otherwise
+    # propagate out of the thread target and stop this node gossiping for good,
+    # silently. Nothing escapes this function.
+    try:
+        membership.merge(decode_membership(delta.membership), now)
 
-    # Push: send back what the peer said it is behind on. ReplicateRecord
-    # already merges on the far side, so no new transfer path is needed.
-    wanted = {uuid.UUID(raw) for raw in delta.wanted_file_ids}
-    for record in local_records:
-        if record.file_id in wanted:
-            stub.ReplicateRecord(
-                record_to_message(record), timeout=settings.rpc_timeout_seconds
-            )
+        # Pull: merge what the peer is ahead on.
+        for message in delta.records:
+            store.merge_remote(message_to_record(message))
+
+        # Push: send back what the peer said it is behind on. ReplicateRecord
+        # already merges on the far side, so no new transfer path is needed.
+        wanted = {uuid.UUID(raw) for raw in delta.wanted_file_ids}
+        for record in local_records:
+            if record.file_id in wanted:
+                stub.ReplicateRecord(
+                    record_to_message(record), timeout=settings.rpc_timeout_seconds
+                )
+    except (grpc.RpcError, ValueError) as error:
+        logger.warning("gossip with %s failed mid-exchange: %s", peer.node_id, error)
+        return False
     return True
 ```
 
-- [ ] **Step 3: Run tests, commit** — `git commit -m "Add a gossip round that reconciles metadata with one peer"`
+- [ ] **Step 3: Test the mid-exchange failure.** Stop the peer's server *after*
+it has answered the digest but before the pushes — simplest with a peer that
+answers once and is then stopped — and assert `gossip_once` returns `False`
+rather than raising. Without this, Step 1's tests only cover a peer that was
+already down.
+
+- [ ] **Step 4: Run tests, commit** — `git commit -m "Add a gossip round that reconciles metadata with one peer"`
 
 ---
 
@@ -767,15 +861,25 @@ Phase 2's sharding is quietly undone.
 - [ ] **Step 2: Implement**
 
 ```python
-def catch_up_blobs(*, settings, store, blob_store, replication_client) -> int:
-    """Fetch blobs this node should hold but does not. Returns how many.
+def catch_up_blobs(
+    *, settings, store, blob_store, replication_client, budget, should_stop
+) -> int:
+    """Fetch up to `budget` blobs this node should hold but does not.
 
     Driven by placement, not by "fetch whatever I am missing": a node pulls only
     the content HRW makes it a replica for. Fetching everything would make each
-    node store the whole corpus and undo the sharding.
+    node store the whole corpus and undo Phase 2's sharding.
+
+    Bounded on purpose. This runs on the gossip thread, and each fetch is a
+    blocking transfer: a node healing from a long partition could otherwise
+    spend minutes inside a single tick, which is what would actually defeat
+    `GossipLoop.stop()`'s join timeout. Whatever is left over is picked up on
+    the next tick — anti-entropy is a loop, not a one-shot.
     """
     fetched = 0
     for record in store.list_live():
+        if fetched >= budget or should_stop():
+            break
         replicas = replica_set(
             record.content_hash, settings.node_ids, settings.replication_factor
         )
@@ -790,7 +894,10 @@ def catch_up_blobs(*, settings, store, blob_store, replication_client) -> int:
     return fetched
 ```
 
-- [ ] **Step 3: Run tests, commit** — `git commit -m "Fetch blobs a node should hold after reconciling metadata"`
+- [ ] **Step 3: Test the budget** — with a budget of 1 and three missing blobs,
+one fetch happens per call and three calls finish the job.
+
+- [ ] **Step 4: Run tests, commit** — `git commit -m "Fetch blobs a node should hold after reconciling metadata"`
 
 ---
 
@@ -798,10 +905,20 @@ def catch_up_blobs(*, settings, store, blob_store, replication_client) -> int:
 
 **Files:** Modify `almacen/config.py`, `almacen/main.py`; create the driver in `almacen/cluster/gossip.py`; test `tests/unit/test_config.py`, `tests/integration/cluster/test_gossip_loop.py`
 
-- [ ] **Step 1: Add settings** — `gossip_interval_seconds` (default 5.0),
-`suspicion_timeout_seconds` (default 15.0), `gossip_fanout` (default 2), each
-with an `ALMACEN_*` environment variable and validation that it is positive. Add
-tests mirroring the existing config tests.
+- [ ] **Step 1: Add settings** — `suspicion_timeout_seconds` (default 15.0),
+`gossip_fanout` (default 2), `blob_catchup_budget` (default 8), and
+`gossip_interval_seconds` (default 5.0). Validate the first three are positive.
+
+`gossip_interval_seconds` is the exception: **a value of 0 or less disables the
+loop entirely**, and that is load-bearing rather than a convenience. Every
+existing multi-node fixture — `tests/cluster/test_five_node_cluster.py` builds
+five nodes through `create_app` + `TestClient` — would otherwise start five real
+gossip threads on a real clock inside a suite that currently runs in under seven
+seconds. Worse, teardown unwinds the nodes in reverse, so a round already in
+flight blocks up to `rpc_timeout_seconds` per peer against servers that have
+already stopped, and `stop()` returns with the thread still alive. Those
+fixtures set the interval to 0; the tests that exercise gossip drive it by
+calling `run_once()` directly.
 
 - [ ] **Step 2: Write the driver**
 
@@ -836,13 +953,28 @@ class GossipLoop:
         """Signal the thread and wait for it, so tests leave nothing running."""
 ```
 
-`stop()` must set the event **and** join the thread. A loop that outlives its
-test leaks a thread per test and produces failures attributed to whatever runs
-next.
+Four requirements on the loop, each of which prevents a specific failure:
+
+- `stop()` sets the event **and** joins the thread, and **raises if the join
+  times out**. Returning silently on a failed join is how a leaked thread
+  becomes a failure attributed to whatever test runs next.
+- The loop **waits on the stop event before its first tick**, not after. Ticking
+  at startup means every `create_app` in the suite does a round of network I/O
+  before anything has asked it to.
+- `run_once` **re-checks the stop event between peers**, so a shutdown during a
+  fanout of 2 does not have to wait out both timeouts.
+- `run_once` **catches per peer**: one unreachable peer must not skip the other,
+  and nothing may escape the thread target.
 
 - [ ] **Step 3: Test the driver without sleeping** — inject a fake clock and a
-deterministic chooser, call `run_once()` directly, and assert convergence.
-Separately, assert that `start()` followed by `stop()` leaves no live thread.
+deterministic chooser, call `run_once()` directly, and assert convergence. Then:
+
+- `start()` followed immediately by `stop()` leaves no live thread
+  (`threading.active_count()` back to its starting value).
+- `run_once()` with one unreachable peer and one reachable peer still reconciles
+  with the reachable one.
+- A `Settings` with `gossip_interval_seconds=0` produces an app whose lifespan
+  starts no thread at all.
 
 - [ ] **Step 4: Wire it into the lifespan** in `main.py`, started after the gRPC
 server and stopped before it, so the node is reachable for the whole time it is
@@ -874,6 +1006,11 @@ than manipulating the network, and it exercises the same code paths. Cover:
 - A node unreachable for longer than the suspicion timeout is marked dead, and
   is marked alive again once it answers.
 - Gossip is idempotent: running extra rounds after convergence changes nothing.
+
+Restarting a server on the same port after `server.stop(0).wait()`: assert that
+`add_insecure_port` returns the port that was asked for. It returns `0` on
+failure without raising, so a rebind that silently fails produces a server bound
+to nothing and a baffling failure further down.
 
 - [ ] **Step 2: Verify these tests have teeth.** Disable the gossip loop (or make
 `plan_exchange` return an empty plan) and confirm the partition-healing tests
