@@ -1,0 +1,26 @@
+// almacen/rpc/replication.proto
+syntax = "proto3";
+
+package almacen;
+
+// Blob transfer between nodes. Content is streamed because a blob can be far
+// larger than gRPC's 4 MiB default message limit.
+service Replication {
+  rpc PutBlob(stream BlobChunk) returns (PutBlobAck);
+  rpc GetBlob(BlobRequest) returns (stream BlobChunk);
+}
+
+message BlobChunk {
+  // Repeated on every chunk so the receiver never needs stream-position state.
+  string content_hash = 1;
+  bytes data = 2;
+}
+
+message PutBlobAck {
+  string content_hash = 1;
+  bool stored = 2;
+}
+
+message BlobRequest {
+  string content_hash = 1;
+}

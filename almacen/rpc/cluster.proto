@@ -1,0 +1,36 @@
+// almacen/rpc/cluster.proto
+syntax = "proto3";
+
+package almacen;
+
+service Cluster {
+  // Phase 2: direct push of a metadata record to a peer. Phase 4's push-pull
+  // anti-entropy supersedes this as the repair mechanism, but this stays as the
+  // fast path.
+  rpc ReplicateRecord(FileRecordMsg) returns (ReplicateAck);
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message FileRecordMsg {
+  string file_id = 1;
+  string name = 2;
+  string content_hash = 3;
+  repeated string tags = 4;
+  bool tombstone = 5;
+  // ISO-8601; empty string means "not set" (proto3 has no null for scalars).
+  string tombstone_at = 6;
+  string created_at = 7;
+  string updated_at = 8;
+}
+
+message ReplicateAck {
+  bool applied = 1;
+}
+
+message PingRequest {
+  string from_node_id = 1;
+}
+
+message PingResponse {
+  string node_id = 1;
+}
