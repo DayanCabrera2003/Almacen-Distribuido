@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 
 from almacen.api.deps import get_live_record, get_metadata_store
 from almacen.api.schemas import AddTagsRequest, TagsResponse
-from almacen.storage.metadata_store import MetadataStore
+from almacen.storage.protocols import MetadataStoreLike
 
 router = APIRouter(prefix="/files/{file_id}/tags", tags=["tags"])
 
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/files/{file_id}/tags", tags=["tags"])
 @router.get("", response_model=TagsResponse)
 def list_tags(
     file_id: uuid.UUID,
-    metadata_store: MetadataStore = Depends(get_metadata_store),
+    metadata_store: MetadataStoreLike = Depends(get_metadata_store),
 ) -> TagsResponse:
     record = get_live_record(metadata_store, file_id)
     return TagsResponse(tags=sorted(record.tags))
@@ -26,7 +26,7 @@ def list_tags(
 def add_tags(
     file_id: uuid.UUID,
     body: AddTagsRequest,
-    metadata_store: MetadataStore = Depends(get_metadata_store),
+    metadata_store: MetadataStoreLike = Depends(get_metadata_store),
 ) -> TagsResponse:
     record = get_live_record(metadata_store, file_id)
     for tag in body.tags:
@@ -39,7 +39,7 @@ def add_tags(
 def remove_tag(
     file_id: uuid.UUID,
     tag: str,
-    metadata_store: MetadataStore = Depends(get_metadata_store),
+    metadata_store: MetadataStoreLike = Depends(get_metadata_store),
 ) -> TagsResponse:
     record = get_live_record(metadata_store, file_id)
     record.remove_tag(tag)

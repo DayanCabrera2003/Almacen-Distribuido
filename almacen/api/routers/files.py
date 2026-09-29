@@ -9,15 +9,15 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from almacen.api.deps import (
-    get_blob_store,
     get_live_record,
     get_metadata_store,
+    get_replication_client,
     get_tag_index,
 )
 from almacen.api.schemas import FileMetadata, to_file_metadata
+from almacen.cluster.replication_client import QuorumNotReached, ReplicationClient
 from almacen.domain.file_record import FileRecord
-from almacen.storage.blob_store import BlobStore
-from almacen.storage.metadata_store import MetadataStore
+from almacen.storage.protocols import MetadataStoreLike
 from almacen.storage.tag_index import TagIndex
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -34,11 +34,16 @@ async def upload_file(
     file: UploadFile,
     name: Annotated[str | None, Form()] = None,
     tags: Annotated[str | None, Form()] = None,
-    blob_store: BlobStore = Depends(get_blob_store),
-    metadata_store: MetadataStore = Depends(get_metadata_store),
+    replication_client: ReplicationClient = Depends(get_replication_client),
+    metadata_store: MetadataStoreLike = Depends(get_metadata_store),
 ) -> FileMetadata:
     content = await file.read()
-    content_hash = blob_store.put(content)
+    try:
+        content_hash = replication_client.put_blob(content)
+    except QuorumNotReached as error:
+        # Recording metadata now would leave a file pointing at content that is
+        # not durable, so nothing is written.
+        raise HTTPException(status_code=503, detail=str(error)) from error
     record = FileRecord.new(
         name=name or file.filename or "untitled",
         content_hash=content_hash,
@@ -66,14 +71,18 @@ def list_files(
 @router.get("/{file_id}")
 def download_file(
     file_id: uuid.UUID,
-    metadata_store: MetadataStore = Depends(get_metadata_store),
-    blob_store: BlobStore = Depends(get_blob_store),
+    metadata_store: MetadataStoreLike = Depends(get_metadata_store),
+    replication_client: ReplicationClient = Depends(get_replication_client),
 ) -> Response:
     record = get_live_record(metadata_store, file_id)
-    content = blob_store.get(record.content_hash)
+    content = replication_client.get_blob(record.content_hash)
     if content is None:
-        # Would indicate local storage corruption/bug, not a client error.
-        raise RuntimeError(f"blob {record.content_hash} missing for known file {file_id}")
+        # The file exists; its bytes are temporarily unreachable. 404 would deny
+        # the file, 500 would blame this node.
+        raise HTTPException(
+            status_code=503,
+            detail=f"no replica currently holds content for file {file_id}",
+        )
     return Response(
         content=content,
         media_type="application/octet-stream",
@@ -86,15 +95,18 @@ async def update_file(
     file_id: uuid.UUID,
     file: Annotated[UploadFile | None, File()] = None,
     name: Annotated[str | None, Form()] = None,
-    metadata_store: MetadataStore = Depends(get_metadata_store),
-    blob_store: BlobStore = Depends(get_blob_store),
+    metadata_store: MetadataStoreLike = Depends(get_metadata_store),
+    replication_client: ReplicationClient = Depends(get_replication_client),
 ) -> FileMetadata:
     record = get_live_record(metadata_store, file_id)
     if name is not None:
         record.rename(name)
     if file is not None:
         content = await file.read()
-        content_hash = blob_store.put(content)
+        try:
+            content_hash = replication_client.put_blob(content)
+        except QuorumNotReached as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         record.update_content(content_hash)
     metadata_store.update(record)
     return to_file_metadata(record)
@@ -103,7 +115,7 @@ async def update_file(
 @router.delete("/{file_id}", status_code=204)
 def delete_file(
     file_id: uuid.UUID,
-    metadata_store: MetadataStore = Depends(get_metadata_store),
+    metadata_store: MetadataStoreLike = Depends(get_metadata_store),
 ) -> None:
     record = get_live_record(metadata_store, file_id)
     record.mark_deleted()
