@@ -1,4 +1,5 @@
 """End-to-end: a five-node cluster behaves like one store from any entry point."""
+import hashlib
 from collections.abc import Iterator
 from contextlib import ExitStack
 from pathlib import Path
@@ -62,10 +63,32 @@ def test_a_file_uploaded_to_one_node_downloads_from_every_other(cluster):
         assert download.content == content
 
 
+def _payload_not_replicated_on(coordinator: str, node_ids: list[str]) -> bytes:
+    """Find content whose replica set excludes `coordinator`.
+
+    Picking a payload by hand is a trap: whether the uploading node happens to
+    be one of its own replicas depends on the SHA-256 of the literal. If it is,
+    the "exactly three holders" assertion below passes even against a
+    coordinator that keeps a copy of everything, because that copy would be a
+    legitimate replica anyway — and the test silently stops guarding the
+    property it looks like it guards.
+    """
+    for index in range(2000):
+        content = f"sharded content {index}".encode()
+        digest = hashlib.sha256(content).hexdigest()
+        if coordinator not in replica_set(digest, node_ids, r=3):
+            return content
+    raise AssertionError(f"no payload found whose replica set excludes {coordinator}")
+
+
 def test_content_lands_on_exactly_three_of_five_nodes(cluster, tmp_path: Path):
+    # Upload through a node that is deliberately NOT one of the replicas, so
+    # three holders can only mean the coordinator kept nothing for itself.
+    content = _payload_not_replicated_on("node2", list(cluster))
+
     upload = cluster["node2"].post(
         "/files",
-        files={"file": ("a.txt", b"sharded content", "text/plain")},
+        files={"file": ("a.txt", content, "text/plain")},
         data={"name": "a.txt"},
     )
     content_hash = upload.json()["content_hash"]
@@ -76,6 +99,10 @@ def test_content_lands_on_exactly_three_of_five_nodes(cluster, tmp_path: Path):
         if (tmp_path / node_id / "blobs" / content_hash).exists()
     }
 
+    assert "node2" not in holders, (
+        "the coordinator is not a replica for this content, so holding a copy "
+        "means it hoards every blob it routes"
+    )
     assert len(holders) == 3, f"expected R=3 replicas, content is on {holders}"
     assert holders == set(replica_set(content_hash, list(cluster), r=3))
 
