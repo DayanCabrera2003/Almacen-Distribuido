@@ -147,3 +147,18 @@ def test_content_update_propagates_to_the_new_replica_set(cluster):
 
     for node_id, client in cluster.items():
         assert client.get(f"/files/{file_id}").content == b"version two", node_id
+
+
+def test_an_empty_file_uploads_and_downloads_across_the_cluster(cluster):
+    upload = cluster["node1"].post(
+        "/files",
+        files={"file": ("empty.txt", b"", "text/plain")},
+        data={"name": "empty.txt"},
+    )
+    assert upload.status_code == 201, upload.text
+    file_id = upload.json()["file_id"]
+
+    for node_id, client in cluster.items():
+        download = client.get(f"/files/{file_id}")
+        assert download.status_code == 200, f"{node_id} could not serve the empty file"
+        assert download.content == b""

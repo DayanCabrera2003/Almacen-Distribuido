@@ -149,6 +149,14 @@ class ReplicationClient:
 
 
 def _chunk(content: bytes, content_hash: str):
+    if not content:
+        # An empty blob is still a blob. Without this, range() yields nothing and
+        # the receiver sees a stream with no chunks, which it cannot distinguish
+        # from a malformed request and therefore rejects — so every remote
+        # replica would refuse an empty file and the write quorum would fail.
+        yield pb.BlobChunk(content_hash=content_hash, data=b"")
+        return
+
     for offset in range(0, len(content), CHUNK_SIZE):
         yield pb.BlobChunk(
             content_hash=content_hash, data=content[offset : offset + CHUNK_SIZE]

@@ -220,3 +220,37 @@ def test_get_blob_rejects_content_that_fails_its_hash_check(cluster, client_on):
     assert client.get_blob(bogus_hash) is None, (
         "content that does not match its address must be discarded, not served"
     )
+
+
+def test_put_blob_replicates_an_empty_blob(cluster, client_on):
+    """An empty file is a legitimate file and must reach its replica set.
+
+    `_chunk` must emit one chunk for empty content: a stream with no chunks at
+    all is indistinguishable from a malformed request, and the servicer rejects
+    it, so every remote replica would refuse and the quorum would fail.
+    """
+    nodes, peers = cluster
+    client = client_on("node1")
+
+    content_hash = client.put_blob(b"")
+
+    assert content_hash == hashlib.sha256(b"").hexdigest()
+    holders = {n.node_id for n in nodes if n.blob_store.exists(content_hash)}
+    assert holders == set(replica_set(content_hash, [p.node_id for p in peers], r=3))
+    assert len(holders) == 3
+
+
+def test_get_blob_returns_an_empty_blob_as_empty_bytes_not_none(cluster, client_on):
+    # b"" is falsy, so any `if content:` check along the path would turn a
+    # successful read of an empty file into a spurious 503.
+    nodes, peers = cluster
+    writer = client_on("node1")
+    content_hash = writer.put_blob(b"")
+
+    node_ids = [p.node_id for p in peers]
+    outsider = next(
+        n for n in nodes if n.node_id not in replica_set(content_hash, node_ids, r=3)
+    )
+    reader = client_on(outsider.node_id)
+
+    assert reader.get_blob(content_hash) == b""
