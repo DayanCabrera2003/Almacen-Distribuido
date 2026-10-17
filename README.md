@@ -61,8 +61,9 @@ budget.
 
 Still missing: OR-Set remove entries for tags are never pruned (safe pruning
 needs every node to have observed the removal, which this design does not
-track). There is no `/cluster/status` endpoint yet — the membership view is
-in-process only — and no structured logging or CLI, which are Phase 6.
+track). Of Phase 6, `GET /cluster/status` and structured logging (see
+[Observability](#observability)) and the [command-line
+client](#command-line-client) are in place.
 
 ### Upgrading from Phase 2
 
@@ -103,6 +104,8 @@ Each node reads its configuration from the environment:
 | `ALMACEN_BLOB_CATCHUP_BUDGET` | `8` | Most blobs fetched in one round, so a long catch-up cannot monopolise the loop |
 | `ALMACEN_GRACE_TTL_SECONDS` | `86400` | How long a tombstone is kept before its record is purged, and how long an unreferenced blob is kept before it is deleted. **Must exceed the longest expected partition**, or deleted files can come back |
 | `ALMACEN_GC_BUDGET` | `32` | Most purges plus blob deletions in one round. GC runs on the gossip loop, so it is disabled along with gossip |
+| `ALMACEN_LOG_FORMAT` | `console` | `console` (coloured, for a terminal) or `json` (one object per line). The Docker image sets `json` |
+| `ALMACEN_LOG_LEVEL` | `INFO` | Minimum level logged: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 With `ALMACEN_PEERS` unset the node is a one-node cluster: the replica set for
 any blob is that single node, and the acknowledgements required shrink to match
@@ -197,6 +200,76 @@ Tear down with:
     docker volume rm almacen-node1-data almacen-node2-data almacen-node3-data \
       almacen-node4-data almacen-node5-data
 
+## Observability
+
+### `GET /cluster/status`
+
+Any node describes the cluster as *it* sees it — useful precisely because two
+nodes can disagree during a partition:
+
+    curl -s http://127.0.0.1:8001/cluster/status | python3 -m json.tool
+
+```json
+{
+  "node_id": "node1",
+  "members": [
+    {"node_id": "node1", "address": "node1:50051", "state": "alive",
+     "incarnation": 0, "since": null, "is_self": true},
+    {"node_id": "node5", "address": "node5:50051", "state": "suspect",
+     "incarnation": 0, "since": "2026-10-17T19:02:11.483Z", "is_self": false}
+  ],
+  "replication": {"replication_factor": 3, "write_quorum": 2, "rpc_timeout_seconds": 5.0},
+  "gossip": {"enabled": true, "interval_seconds": 2.0, "fanout": 2,
+             "suspicion_timeout_seconds": 6.0, "blob_catchup_budget": 8},
+  "gc": {"grace_ttl_seconds": 86400.0, "budget": 32},
+  "storage": {"live_records": 12, "tombstones": 1, "blobs": 8}
+}
+```
+
+- `members` lists every node this one knows of, itself included, sorted by id.
+  `state` is `alive`, `suspect` or `dead`; `incarnation` is the counter a node
+  bumps to refute a false suspicion about itself; `since` is when this node last
+  saw that member's state change (`null` if it never has).
+- The membership is read in one snapshot under the membership lock, so it is
+  internally consistent even while gossip is merging into it. `storage` counts
+  are local to this node and read separately: `live_records` and `tombstones`
+  should match on every node once gossip converges (metadata is replicated in
+  full), while `blobs` differs, since each node holds only the content it is a
+  replica for.
+
+### Structured logs
+
+Every log line is an event with a stable snake_case name and key/value fields,
+always including the `node_id` of the node that emitted it. With
+`ALMACEN_LOG_FORMAT=json` (the Docker image's default) each line is one JSON
+object:
+
+    {"peer": "node3", "pulled": 1, "pushed": 0, "event": "gossip_round_completed",
+     "level": "info", "logger": "almacen.cluster.gossip", "node_id": "node1",
+     "timestamp": "2026-10-17T19:02:13.120481Z"}
+
+The events worth filtering on:
+
+| Event | Level | Fields | When |
+| --- | --- | --- | --- |
+| `node_started` / `node_stopped` | info | `grpc_port`, `peers`, `gossip_enabled` | Lifespan start and end |
+| `gossip_round_completed` | info | `peer`, `pulled`, `pushed` | A push-pull round reconciled with a peer |
+| `gossip_round_failed` | info / warning | `peer`, `stage` (`exchange` \| `reconcile`), `error` | The peer was unreachable (info: routine), or failed after answering (warning) |
+| `member_state_changed` | info | `peer`, `from_state`, `to_state`, `incarnation`, `reason` (`probe_failed`, `probe_succeeded`, `gossip`, `suspicion_timeout`) | Logged once per transition, as this node first observes it |
+| `member_refuted_suspicion` | warning | `claimed_state`, `incarnation` | Another node reported this one as suspect or dead |
+| `concurrent_update_resolved` | warning | `file_id`, `sender`, `local_clock`, `incoming_clock`, `resolution` | Two concurrent writes, settled by last-writer-wins |
+| `blob_replication_failed` | warning | `replica`, `content_hash`, `error` | One replica refused or missed a blob write |
+| `write_quorum_not_reached` | warning | `content_hash`, `acknowledged`, `required` | An upload failed with `503` |
+| `blob_fetch_failed` | info | `replica`, `content_hash`, `error` | A read fell through to the next replica |
+| `record_replication_failed` | warning | `peer`, `file_id`, `error` | A best-effort metadata push missed a peer |
+| `blob_caught_up` | info | `content_hash` | Anti-entropy fetched a blob this node is a replica for |
+
+`error` is the gRPC status code (`UNAVAILABLE`, `DEADLINE_EXCEEDED`) when there
+is one. Uvicorn's own lines go through the same renderer, so the stream stays
+one JSON object per line. To follow one node's view of a failure:
+
+    docker logs -f node1 2>&1 | grep member_state_changed
+
 ## Regenerating the gRPC stubs
 
 `almacen/rpc/*_pb2*.py` are generated from the `.proto` files and committed, so a
@@ -224,6 +297,7 @@ raise the `protobuf` floor in `pyproject.toml` to match.
 | `GET`    | `/files/{file_id}/tags`       | List the file's tags.                                    |
 | `POST`   | `/files/{file_id}/tags`       | Add tags (JSON body `{"tags": ["a", "b"]}`).             |
 | `DELETE` | `/files/{file_id}/tags/{tag}` | Remove one tag. Removing an absent tag is a no-op.       |
+| `GET`    | `/cluster/status`             | This node's view of membership, its settings and local counts; see [Observability](#observability). |
 
 Notes:
 
@@ -270,6 +344,7 @@ shows the answering node's own view of the cluster; a node without the
     almacen/
       config.py          # node Settings: storage paths + static cluster membership
       main.py            # FastAPI app factory; lifespan runs the gRPC server
+      observability.py   # structlog configuration (JSON or console)
       domain/            # FileRecord entity, no I/O
       crdt/              # OrSet, LWWRegister, VectorClock — pure, no I/O
       storage/           # BlobStore (filesystem), MetadataStore (SQLite), TagIndex,

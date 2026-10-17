@@ -95,8 +95,22 @@ be reached, which keeps the client working while a node is partitioned:
     almacen-cli --node http://127.0.0.1:8001,http://127.0.0.1:8002 upload README.md --tag demo
     almacen-cli --node http://127.0.0.1:8005 list --tag demo
 
-Inspect a node with `docker logs node3`, or open its API docs at
-http://127.0.0.1:8003/docs.
+Ask any node how it sees the cluster — every member's state (`alive`,
+`suspect`, `dead`), the replication, gossip and GC settings, and its local
+record, tombstone and blob counts:
+
+    curl -s http://127.0.0.1:8001/cluster/status | python3 -m json.tool
+    almacen-cli --node http://127.0.0.1:8001 status   # the same, as a table
+
+Inspect a node's logs with `docker logs node3`. The image sets
+`ALMACEN_LOG_FORMAT=json`, so each line is one JSON object carrying an `event`
+name and the emitting `node_id`, which makes them easy to filter:
+
+    docker logs -f node1 2>&1 | grep -E 'member_state_changed|gossip_round_failed'
+
+Pass `-e ALMACEN_LOG_FORMAT=console` to `docker run` for human-readable lines
+instead. The README's Observability section lists the events. Each node's API
+docs are at http://127.0.0.1:8003/docs (and so on per port).
 
 ## 6. Inject a partition
 
@@ -152,6 +166,10 @@ survive; the 24h default is that margin.
 
     docker stop node3        # crash: the others suspect, then declare it dead
     docker start node3       # recovery: same container, same volume, same data
+
+While node3 is down, `curl -s http://127.0.0.1:8001/cluster/status` shows it go
+from `suspect` to `dead` once the suspicion timeout passes, and back to `alive`
+with a higher `incarnation` after it restarts and gossips again.
 
 ## 9. Tear down
 
