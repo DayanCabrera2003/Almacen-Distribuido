@@ -232,6 +232,39 @@ Notes:
 - `mode` only applies when `tags` is given; an invalid `mode` alongside `tags`
   returns `400`.
 
+## Command-line client
+
+`pip install -e .` also installs `almacen-cli`, which covers every endpoint above
+so the cluster can be operated without curl:
+
+    almacen-cli upload README.md --tag demo --tag docs   # --name to rename
+    almacen-cli list --tag demo --tag docs               # AND; --any for OR
+    almacen-cli download FILE_ID                         # or: get FILE_ID -o out.md / -o -
+    almacen-cli update FILE_ID --name new.md --file v2.md
+    almacen-cli tag list FILE_ID
+    almacen-cli tag add FILE_ID urgent,review
+    almacen-cli tag remove FILE_ID draft
+    almacen-cli delete FILE_ID
+    almacen-cli status                                   # GET /cluster/status
+
+Global options go before the command:
+
+- `--node URL` (or `ALMACEN_NODE_URL`, default `http://127.0.0.1:8001`) picks the
+  node. A comma-separated list is tried in order, moving on only when a node
+  cannot be *connected to* — a warning names each node skipped. A node that
+  answers, even with an error, is not retried elsewhere, and neither is a request
+  that timed out after connecting: it may already have been applied, and
+  repeating an upload or delete on another node could apply it twice. During a
+  partition demo, `--node http://127.0.0.1:8005,http://127.0.0.1:8001` keeps
+  working when node5 is cut off.
+- `--json` prints the raw API response instead of a table.
+
+Tags may be given as repeated options/arguments or comma-separated. Exit status is
+`0` on success, `1` when a node answered with an error (the message is on
+stderr), `2` for usage errors, and `3` when no node was reachable. `status`
+shows the answering node's own view of the cluster; a node without the
+`/cluster/status` endpoint is reported as such rather than as a generic 404.
+
 ## Layout
 
     almacen/
@@ -244,11 +277,12 @@ Notes:
       rpc/               # node-to-node gRPC: protos, generated stubs, servicers
       cluster/           # placement (HRW), replication, membership, gossip, anti-entropy, GC
       api/               # schemas, dependency providers, routers
+      cli/               # almacen-cli: Typer commands over the REST API, node failover
     docker/              # Dockerfile (one image: every node is the same kind)
     scripts/             # gen_protos.sh
     tests/
       unit/              # crdt, domain, config, placement, codec — no I/O
-      integration/       # storage, rpc, cluster, API
+      integration/       # storage, rpc, cluster, API, CLI
       cluster/           # five-node end-to-end
 
 ## Further reading
