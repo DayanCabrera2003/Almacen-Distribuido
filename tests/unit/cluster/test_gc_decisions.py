@@ -8,6 +8,7 @@ from almacen.domain.file_record import FileRecord
 NOW = datetime(2026, 1, 2, tzinfo=timezone.utc)
 GRACE = timedelta(hours=24)
 DEADLINE = NOW - GRACE
+JUST = timedelta(microseconds=1)
 
 
 def live() -> FileRecord:
@@ -148,3 +149,14 @@ def test_a_reference_to_a_blob_not_held_locally_is_ignored():
     assert decision.newly_unreferenced == set()
     assert decision.no_longer_candidates == set()
     assert decision.deletable == set()
+
+
+# ---- is_expired_tombstone ----
+
+
+def test_expiry_matches_the_purge_rule():
+    from almacen.cluster.gc import is_expired_tombstone
+
+    assert is_expired_tombstone(tombstoned_at(DEADLINE), NOW, GRACE) is True
+    assert is_expired_tombstone(tombstoned_at(DEADLINE + JUST), NOW, GRACE) is False
+    assert is_expired_tombstone(live(), NOW, GRACE) is False

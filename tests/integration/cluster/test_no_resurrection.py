@@ -15,6 +15,7 @@ from almacen.cluster.gc import collect
 from almacen.cluster.gossip import gossip_once
 from almacen.cluster.membership import Membership
 from almacen.config import Peer, Settings
+from almacen.crdt.lww_register import LWWRegister
 from almacen.domain.file_record import FileRecord
 from almacen.rpc.server import build_server
 from almacen.storage.blob_store import BlobStore
@@ -44,6 +45,7 @@ def pair(tmp_path: Path):
             node_id=node_id,
             membership=membership,
             port=ports[node_id],
+            grace_ttl=GRACE,
         )
         server.start()
         nodes[node_id] = {
@@ -57,6 +59,7 @@ def pair(tmp_path: Path):
                 db_path=root / "metadata.db",
                 node_id=node_id,
                 peers=peers,
+                grace_ttl_seconds=GRACE.total_seconds(),
             ),
         }
 
@@ -151,8 +154,7 @@ def test_gc_within_the_ttl_keeps_the_tombstone_so_the_delete_wins(pair):
 
 def test_a_purge_after_the_peer_saw_the_tombstone_stays_deleted(pair):
     # node1 purges after the TTL while node2, which has the tombstone, has not
-    # collected yet. Gossip re-teaches node1 the record — as a tombstone, which
-    # is harmless: it is not served, and node1 purges it again later.
+    # collected yet. Whatever gossip does next, the file must not come back live.
     nodes, gossip, run_gc = pair
     record = share_one_file(nodes)
     deleted_at = delete_on_node1(nodes, record)
@@ -181,3 +183,67 @@ def test_with_the_ttl_respected_both_sides_end_with_nothing(pair):
 
     for node_id, node in nodes.items():
         assert node["store"].list_all() == [], node_id
+
+
+def created_long_ago() -> FileRecord:
+    """A live file written more than one grace TTL ago."""
+    long_ago = datetime.now(timezone.utc) - GRACE - timedelta(seconds=10)
+    record = FileRecord.new(name="old.txt", content_hash="h", node_id="node1")
+    record.name_register = LWWRegister("old.txt", long_ago, "node1")
+    record.content_hash_register = LWWRegister("h", long_ago, "node1")
+    record.tombstone_register = LWWRegister(False, long_ago, "node1")
+    record.created_at = record.updated_at = long_ago
+    return record
+
+
+def deleted_long_ago(live: FileRecord) -> FileRecord:
+    """`live`, deleted more than one grace TTL ago."""
+    deleted = live.copy()
+    deleted.vector_clock.increment("node1")
+    deleted_at = live.created_at + timedelta(seconds=1)
+    deleted.tombstone_register = LWWRegister(True, deleted_at, "node1")
+    deleted.updated_at = deleted_at
+    return deleted
+
+
+def share_an_expired_tombstone(nodes) -> FileRecord:
+    """A file both nodes hold as a tombstone already older than the grace TTL."""
+    record = deleted_long_ago(created_long_ago())
+    for node in nodes.values():
+        node["store"].insert(record.copy())
+    return record
+
+
+@pytest.mark.parametrize("initiator", PEERS)
+def test_an_expired_tombstone_is_not_re_taught_to_a_node_that_purged_it(
+    pair, initiator
+):
+    # Measured on a live five-node cluster: each node gossips before it
+    # collects, so a node still holding an expired tombstone handed it back to
+    # peers that had already purged it, and the record bounced between nodes
+    # indefinitely. Refusing to adopt it is equivalent to adopting and purging
+    # it at once. Both directions are covered: pulled by node1's own round, and
+    # pushed to node1's servicer by node2's.
+    nodes, gossip, run_gc = pair
+    record = share_an_expired_tombstone(nodes)
+    run_gc("node1", datetime.now(timezone.utc))
+    assert nodes["node1"]["store"].get(record.file_id) is None
+
+    gossip(initiator)
+
+    assert nodes["node1"]["store"].get(record.file_id) is None
+
+
+def test_an_expired_tombstone_still_deletes_a_stale_live_copy(pair):
+    # The refusal covers only records the receiver does not hold. A node that
+    # was partitioned past the TTL and still serves the file must still learn
+    # of the delete if a peer has not purged it yet.
+    nodes, gossip, _ = pair
+    live = created_long_ago()
+    nodes["node1"]["store"].insert(live.copy())
+    nodes["node2"]["store"].insert(deleted_long_ago(live))
+    assert live_ids(nodes["node1"]) == {live.file_id}
+
+    gossip("node2")
+
+    assert nodes["node1"]["store"].get(live.file_id).tombstone is True

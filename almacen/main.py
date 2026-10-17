@@ -45,6 +45,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         node_id=settings.node_id,
         membership=app.state.membership,
         port=settings.grpc_port,
+        grace_ttl=timedelta(seconds=settings.grace_ttl_seconds),
     )
     server.start()
     app.state.grpc_server = server

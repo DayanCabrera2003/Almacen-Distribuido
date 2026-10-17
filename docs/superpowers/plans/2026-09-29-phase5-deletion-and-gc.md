@@ -46,6 +46,8 @@ Everything below follows from avoiding it. The grace TTL is not a tidiness knob;
 
 7. **OR-Set remove-set pruning is NOT in this phase** — a correction to what `DAA/crdt-selection.md` and `DAA/anti-entropy-digests.md` currently say. Pruning a remove is exactly the resurrection hazard one level down: drop `(tag, node, counter)` from the remove set while any peer still holds the matching add, and the next merge brings the tag back. Doing it safely needs to know that *every* node has observed the removal — a causal-stability barrier, which is a distinct mechanism this design does not have and which is a larger piece of work than the rest of this phase combined. Task 6 amends both notes rather than leaving them promising something that is not delivered.
 
+8. **An expired tombstone is not adopted by a node that does not hold the record.** Found during the Task 7 manual run on a live five-node cluster, not foreseen here: each node gossips *before* it collects, so a node still holding an expired tombstone hands it back to peers that have already purged it, and the record bounced between nodes indefinitely — never resurrected (it stays a tombstone), but never gone either. `MetadataStore.merge_remote` takes a `refuse_unknown` predicate, and both receive paths (the gossip pull in `gossip_once` and `ClusterServicer.ReplicateRecord`) refuse a record they do not hold when it is a tombstone past the grace TTL. That is equivalent to adopting it and purging it at once, so it cannot resurrect anything — only an incoming *live* copy can. A held record always merges, so an expired tombstone still deletes a stale live copy on a node that was partitioned past the TTL.
+
 ---
 
 ## File Structure

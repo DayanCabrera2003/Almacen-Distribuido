@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 import grpc
 
 from almacen.cluster.channels import ChannelPool
-from almacen.cluster.gc import collect
+from almacen.cluster.gc import collect, is_expired_tombstone
 from almacen.cluster.membership import Membership
 from almacen.cluster.placement import replica_set
 from almacen.cluster.reconciliation import build_digest
@@ -72,9 +72,14 @@ def gossip_once(
     try:
         membership.merge(decode_membership(delta.membership), now)
 
-        # Pull: merge what the peer is ahead on.
+        # Pull: merge what the peer is ahead on — except a tombstone this node
+        # has already purged, or would purge on its next round anyway.
+        grace = timedelta(seconds=settings.grace_ttl_seconds)
         for message in delta.records:
-            store.merge_remote(message_to_record(message))
+            store.merge_remote(
+                message_to_record(message),
+                refuse_unknown=lambda r: is_expired_tombstone(r, now, grace),
+            )
 
         # Push: send back what the peer said it is behind on. ReplicateRecord
         # already merges on the far side, so no new transfer path is needed.

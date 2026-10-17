@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import grpc
 
+from almacen.cluster.gc import is_expired_tombstone
 from almacen.cluster.membership import Membership
 from almacen.cluster.reconciliation import build_digest, plan_exchange
 from almacen.rpc import cluster_pb2 as pb
@@ -32,6 +33,7 @@ class ClusterServicer(pb_grpc.ClusterServicer):
         metadata_store: MetadataStore,
         node_id: str,
         membership: Membership | None = None,
+        grace_ttl: timedelta | None = None,
     ) -> None:
         # Deliberately the *local* store, never the replicating wrapper: applying
         # a record received from a peer must not push it back out, or every
@@ -39,6 +41,12 @@ class ClusterServicer(pb_grpc.ClusterServicer):
         self._metadata_store = metadata_store
         self._node_id = node_id
         self._membership = membership
+        # The node's GC grace TTL. When set, a tombstone already past it is not
+        # adopted by a store that does not hold the record: a node gossips
+        # before it collects, so without this a peer that has not purged yet
+        # hands the record straight back to one that has, and it bounces round
+        # the cluster indefinitely. None (tests of other concerns) adopts all.
+        self._grace_ttl = grace_ttl
 
     def ReplicateRecord(
         self, request: pb.FileRecordMsg, context: grpc.ServicerContext
@@ -73,9 +81,14 @@ class ClusterServicer(pb_grpc.ClusterServicer):
 
         # Merge, never overwrite. An incoming record is one replica's view, not
         # the truth: the local copy may hold edits the sender never saw.
-        self._metadata_store.merge_remote(record)
+        self._metadata_store.merge_remote(record, refuse_unknown=self._refuse_unknown)
         logger.debug("merged replicated record %s", record.file_id)
         return pb.ReplicateAck(applied=True)
+
+    def _refuse_unknown(self, record) -> bool:
+        if self._grace_ttl is None:
+            return False
+        return is_expired_tombstone(record, _utcnow(), self._grace_ttl)
 
     def Ping(
         self, request: pb.PingRequest, context: grpc.ServicerContext

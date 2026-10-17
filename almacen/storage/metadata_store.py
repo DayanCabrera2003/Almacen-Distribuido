@@ -126,17 +126,31 @@ class MetadataStore:
             self._write(record)
             return record
 
-    def merge_remote(self, incoming: FileRecord) -> FileRecord:
+    def merge_remote(
+        self,
+        incoming: FileRecord,
+        *,
+        refuse_unknown: Callable[[FileRecord], bool] | None = None,
+    ) -> FileRecord | None:
         """Merge a record received from a peer into the local copy.
 
         Read-merge-write happens under the store's lock, so two records arriving
         for the same file at once cannot interleave and lose one side's changes.
+
+        `refuse_unknown` is consulted only when this store does not hold the
+        record; if it returns True the record is not adopted and None is
+        returned. GC uses it to keep a purged, expired tombstone from being
+        taught straight back (see `almacen.cluster.gc.is_expired_tombstone`).
+        It is checked under the same lock as the insert, so a record cannot
+        arrive in between and be skipped by mistake.
         """
         with self._lock, self._conn:
             row = self._conn.execute(
                 _SELECT_ONE, (str(incoming.file_id),)
             ).fetchone()
             if row is None:
+                if refuse_unknown is not None and refuse_unknown(incoming):
+                    return None
                 self._insert_locked(incoming)
                 return incoming
 

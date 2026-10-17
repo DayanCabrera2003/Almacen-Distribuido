@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent import futures
+from datetime import timedelta
 
 import grpc
 
@@ -23,6 +24,7 @@ def build_server(
     port: int,
     membership: Membership | None = None,
     max_workers: int = DEFAULT_MAX_WORKERS,
+    grace_ttl: timedelta | None = None,
 ) -> grpc.Server:
     """Build the node's gRPC server, bound but not started.
 
@@ -38,13 +40,21 @@ def build_server(
     need not build one. When present it must be the *same instance* the gossip
     loop uses: two instances would each hold half the picture and neither would
     ever see the other's observations.
+
+    `grace_ttl` is the node's GC grace TTL; see ClusterServicer for why the
+    servicer needs it.
     """
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
     replication_pb2_grpc.add_ReplicationServicer_to_server(
         ReplicationServicer(blob_store), server
     )
     cluster_pb2_grpc.add_ClusterServicer_to_server(
-        ClusterServicer(metadata_store, node_id=node_id, membership=membership),
+        ClusterServicer(
+            metadata_store,
+            node_id=node_id,
+            membership=membership,
+            grace_ttl=grace_ttl,
+        ),
         server,
     )
     # Binding to all interfaces is required inside a container, where peers reach

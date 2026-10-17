@@ -183,3 +183,23 @@ def test_reference_counts_follow_a_content_repoint(store: MetadataStore):
     store.mutate(record.file_id, lambda r: r.update_content("new", "node1"))
 
     assert store.reference_counts() == {"new": 1}
+
+
+def test_merge_remote_can_refuse_a_record_it_does_not_hold(store: MetadataStore):
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
+
+    assert store.merge_remote(record, refuse_unknown=lambda r: True) is None
+    assert store.get(record.file_id) is None
+
+
+def test_merge_remote_never_refuses_a_record_it_already_holds(store: MetadataStore):
+    # The refusal is about adoption only; a held record always merges, or an
+    # incoming delete could be dropped on the floor.
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
+    store.insert(record.copy())
+    record.mark_deleted("node2")
+
+    merged = store.merge_remote(record, refuse_unknown=lambda r: True)
+
+    assert merged is not None and merged.tombstone is True
+    assert store.get(record.file_id).tombstone is True

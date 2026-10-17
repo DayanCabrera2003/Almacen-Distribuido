@@ -19,6 +19,20 @@ from almacen.storage.metadata_store import MetadataStore
 logger = logging.getLogger(__name__)
 
 
+def is_expired_tombstone(record: FileRecord, now: datetime, grace: timedelta) -> bool:
+    """Whether `record` is a tombstone at least one grace TTL old.
+
+    A tombstone without a time never counts as expired. It should not exist,
+    and guessing a time for it is exactly how a file gets purged before its
+    tombstone has propagated — which a peer then undoes by resurrecting it.
+    """
+    return (
+        record.tombstone
+        and record.tombstone_at is not None
+        and record.tombstone_at <= now - grace
+    )
+
+
 def records_to_purge(
     records: Sequence[FileRecord], now: datetime, grace: timedelta
 ) -> list[uuid.UUID]:
@@ -28,18 +42,11 @@ def records_to_purge(
     heard about it: its purpose is to bound how long the tombstone has had to
     reach every peer, which is a property of the delete rather than of the
     observer.
-
-    A tombstone without a time is never purged. It should not exist, and
-    guessing a time for it is exactly how a file gets purged before its
-    tombstone has propagated — which a peer then undoes by resurrecting it.
     """
-    deadline = now - grace
     return [
         record.file_id
         for record in records
-        if record.tombstone
-        and record.tombstone_at is not None
-        and record.tombstone_at <= deadline
+        if is_expired_tombstone(record, now, grace)
     ]
 
 
