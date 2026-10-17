@@ -64,6 +64,34 @@ _COLUMNS = (
 )
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM files WHERE file_id = ?"
 
+# Live files whose visible tags match a query: the inverted-index read path.
+#
+# - `a.tag IN (...)` seeks `idx_file_tag_adds_tag`, touching only the postings
+#   of the queried tags rather than every live file.
+# - The NOT EXISTS anti-join keeps an add occurrence only if no remove carries
+#   the same full occurrence (file_id, tag, node_id, counter) — a primary-key
+#   probe into `file_tag_removes`. That is exactly `adds - removes` in
+#   `OrSet.value()`, so a concurrent add that a remove never observed survives.
+# - GROUP BY file_id deduplicates (a tag can have several surviving adds); for
+#   AND, `{having}` keeps files that matched all k distinct query tags, which is
+#   relational division as a count. The caller passes distinct tags, so k is
+#   the right target.
+# - Tombstoned files are excluded on the outer, primary-key lookup of `files`.
+_TAG_MATCH = f"""
+SELECT {_COLUMNS} FROM files
+WHERE tombstone = 0 AND file_id IN (
+    SELECT a.file_id FROM file_tag_adds AS a
+    WHERE a.tag IN ({{placeholders}})
+      AND NOT EXISTS (
+          SELECT 1 FROM file_tag_removes AS r
+          WHERE r.file_id = a.file_id AND r.tag = a.tag
+            AND r.node_id = a.node_id AND r.counter = a.counter
+      )
+    GROUP BY a.file_id
+    {{having}}
+)
+"""
+
 # File ids bound per `IN (...)` when reading tag state in bulk. Well under
 # SQLite's historical 999-parameter limit, so it holds on any build.
 _ID_BATCH_SIZE = 500
@@ -166,6 +194,27 @@ class MetadataStore:
         with self._lock:
             rows = self._conn.execute(
                 f"SELECT {_COLUMNS} FROM files WHERE tombstone = 0"
+            ).fetchall()
+            return self._decode_rows(rows)
+
+    def find_live_by_tags(self, tags: set[str], *, match_all: bool) -> list[FileRecord]:
+        """Live records carrying all (`match_all`) or any of `tags`.
+
+        Answered from the tag tables instead of decoding every live record: a
+        tag is visible on a file iff some add occurrence of it is not cancelled
+        by a remove of that exact occurrence — the OR-Set's `value()`,
+        evaluated per occurrence by the anti-join below. Only the matching
+        records are then decoded. See `_TAG_MATCH` for the query itself.
+        """
+        if not tags:
+            raise ValueError("find_live_by_tags needs at least one tag")
+        wanted = sorted(tags)
+        placeholders = ", ".join("?" * len(wanted))
+        having = "HAVING COUNT(DISTINCT a.tag) = ?" if match_all else ""
+        params: list[object] = [*wanted, *([len(wanted)] if match_all else [])]
+        with self._lock:
+            rows = self._conn.execute(
+                _TAG_MATCH.format(placeholders=placeholders, having=having), params
             ).fetchall()
             return self._decode_rows(rows)
 
