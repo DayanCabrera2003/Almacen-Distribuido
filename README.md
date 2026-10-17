@@ -49,7 +49,8 @@ are Phase 6.
 
 The metadata schema changed incompatibly to store the CRDT state, and no
 migration is provided: a node's `ALMACEN_DATA_DIR` must be empty before it
-starts. `docker compose ... down -v` removes the volumes.
+starts. Removing the node's volume (`docker volume rm almacen-nodeN-data`)
+empties it; see [docs/deployment.md](docs/deployment.md).
 
 ## Setup
 
@@ -89,7 +90,21 @@ configured value. This is how local development and most of the test suite run.
 
 ## Run a five-node cluster
 
-    docker compose -f docker/docker-compose.yml up --build -d
+The cluster is deployed by hand with `docker build`, `docker network create` and
+one `docker run` per node — no orchestration file. The full step-by-step, with
+the reason for every flag, is in [docs/deployment.md](docs/deployment.md). In
+short:
+
+    docker build -f docker/Dockerfile -t almacen:latest .
+    docker network create almacen-net
+    PEERS="node1@node1:50051,node2@node2:50051,node3@node3:50051,node4@node4:50051,node5@node5:50051"
+    for i in 1 2 3 4 5; do
+      docker run -d --name node$i --hostname node$i --network almacen-net \
+        -p 800$i:8000 -v almacen-node$i-data:/data \
+        -e ALMACEN_NODE_ID=node$i -e ALMACEN_PEERS="$PEERS" \
+        -e ALMACEN_GOSSIP_INTERVAL_SECONDS=2 -e ALMACEN_SUSPICION_TIMEOUT_SECONDS=6 \
+        almacen:latest
+    done
 
 Nodes are exposed on ports 8001-8005. Any node accepts any request, and a node
 serves content it does not itself hold by fetching it from a replica:
@@ -98,20 +113,19 @@ serves content it does not itself hold by fetching it from a replica:
     curl "http://127.0.0.1:8005/files?tags=demo"
 
 Nodes have no startup ordering, so an upload issued in the first seconds after
-`up` may return 503 while peers are still binding their gRPC ports. Give the
-cluster a moment before the first request.
+starting them may return 503 while peers are still binding their gRPC ports.
+Give the cluster a moment before the first request.
 
-The Compose file shortens the gossip interval to 2s and the suspicion timeout to
-6s, so reconciliation is observable within a demo session rather than on the
+The commands above shorten the gossip interval to 2s and the suspicion timeout
+to 6s, so reconciliation is observable within a demo session rather than on the
 production schedule.
 
 ### Demonstrating a partition
 
-    docker compose -f docker/docker-compose.yml up --build -d
-    sleep 8
+With the cluster running:
 
     # Cut node5 off from the cluster network.
-    docker network disconnect almacen_default almacen-node5-1
+    docker network disconnect almacen-net node5
 
     # Write while it is isolated.
     FILE_ID=$(curl -s -F "file=@README.md" -F "name=during-partition.md" \
@@ -119,10 +133,10 @@ production schedule.
       | python3 -c "import sys,json; print(json.load(sys.stdin)['file_id'])")
 
     curl -s -o /dev/null -w "node2: %{http_code}\n" http://127.0.0.1:8002/files/$FILE_ID
-    curl -s -o /dev/null -w "node5: %{http_code}\n" http://127.0.0.1:8005/files/$FILE_ID
+    curl -s -m 3 -o /dev/null -w "node5: %{http_code}\n" http://127.0.0.1:8005/files/$FILE_ID
 
     # Heal, and give gossip a few rounds.
-    docker network connect almacen_default almacen-node5-1
+    docker network connect almacen-net node5
     sleep 10
     curl -s -o /dev/null -w "node5: %{http_code}\n" http://127.0.0.1:8005/files/$FILE_ID
 
@@ -132,7 +146,12 @@ entirely, so its published port stops answering too, and curl cannot connect at
 all. After healing it answers `200`, having learned both the record and the
 content through gossip.
 
-Tear down with `docker compose -f docker/docker-compose.yml down -v`.
+Tear down with:
+
+    docker rm -f node1 node2 node3 node4 node5
+    docker network rm almacen-net
+    docker volume rm almacen-node1-data almacen-node2-data almacen-node3-data \
+      almacen-node4-data almacen-node5-data
 
 ## Regenerating the gRPC stubs
 
@@ -180,7 +199,7 @@ Notes:
       rpc/               # node-to-node gRPC: protos, generated stubs, servicers
       cluster/           # placement (HRW), replication, membership, gossip, anti-entropy
       api/               # schemas, dependency providers, routers
-    docker/              # Dockerfile + five-node Compose cluster
+    docker/              # Dockerfile (one image: every node is the same kind)
     scripts/             # gen_protos.sh
     tests/
       unit/              # crdt, domain, config, placement, codec — no I/O
