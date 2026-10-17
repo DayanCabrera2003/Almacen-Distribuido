@@ -342,6 +342,12 @@ Notes:
   endpoint above returns `404` for it.
 - `mode` only applies when `tags` is given; an invalid `mode` alongside `tags`
   returns `400`.
+- Every tag, wherever it is sent (upload form, add body, remove path, query), is
+  stripped of surrounding whitespace and must then be non-empty, contain no
+  comma and no control character, and be at most 128 characters; otherwise the
+  request is rejected with `422` and the reason. In a comma-separated list an
+  empty entry (`a,,b`) is rejected too, while a blank value means no tags. So
+  any tag that is accepted can be found again by `GET /files?tags=...`.
 
 ## Command-line client
 
@@ -382,7 +388,7 @@ shows the answering node's own view of the cluster; a node without the
       config.py          # node Settings: storage paths + static cluster membership
       main.py            # FastAPI app factory; lifespan runs the gRPC server
       observability.py   # structlog configuration (JSON or console)
-      domain/            # FileRecord entity, no I/O
+      domain/            # FileRecord entity and the tag rule, no I/O
       crdt/              # OrSet, LWWRegister, VectorClock — pure, no I/O
       storage/           # BlobStore (filesystem), MetadataStore (SQLite), TagIndex,
                          # BlobGCState (when each orphaned blob lost its last referrer)

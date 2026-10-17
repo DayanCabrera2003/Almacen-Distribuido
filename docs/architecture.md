@@ -376,6 +376,28 @@ silently erases someone else's new tag. Both the add and the remove sets are
 persisted (`file_tag_adds`, `file_tag_removes`); dropping the removes would
 resurrect tags on the next merge.
 
+### What a tag may be
+
+A tag is only useful if a query can name it again, and queries
+(`GET /files?tags=a,b`) and the upload form take a comma-separated list whose
+entries are stripped. A tag stored with a comma, surrounding whitespace or no
+characters at all could be written but never found. One rule therefore applies
+on every API input path — the upload form, the add-tags body, the remove-tag
+path segment and the query — and lives in one place, `almacen/domain/tags.py`:
+
+- surrounding whitespace is stripped (inner spaces are kept);
+- the result must be non-empty, contain no comma and no control character
+  (newline, tab, NUL, ...), and be at most 128 characters long.
+
+A tag that breaks the rule is answered with `422` and the reason; a request
+carrying several tags is rejected as a whole. In a comma-separated list an empty
+entry (`a,,b`) is an error rather than silently dropped, while a blank value
+means "no tags". Any other character, `/` and non-ASCII letters included, is
+allowed: the remove route matches the rest of the path, so a percent-encoded `/`
+still reaches the handler. The rule is enforced at the API, not inside the
+CRDT: records arriving from peers by replication or gossip are merged as they
+are, since every peer applied the same rule when it accepted the write.
+
 ### Single-value fields: LWW-registers with monotonic timestamps
 
 A name or a content pointer cannot be merged meaningfully, so one value wins:
@@ -949,7 +971,7 @@ raw API response instead of a table. `status` reports a node that does not serve
 
 | Package | Responsibility |
 | --- | --- |
-| `almacen/domain/` | `FileRecord`: the CRDT-backed entity, mutations and merge. No I/O. |
+| `almacen/domain/` | `FileRecord`: the CRDT-backed entity, mutations and merge; `tags`: the rule every accepted tag satisfies. No I/O. |
 | `almacen/crdt/` | `LWWRegister`, `OrSet`, `VectorClock`. Pure. |
 | `almacen/storage/` | `BlobStore` (filesystem), `MetadataStore` (SQLite: records, merge, purge, reference counts), `TagIndex` (queries), `BlobGCState` (SQLite: GC candidates and when each became one) |
 | `almacen/cluster/` | Placement (HRW), replication client (W-of-R), metadata replicator, membership, reconciliation, gossip loop and blob catch-up (`gossip.py`), GC rules and collector (`gc.py`), conflict logging (`conflicts.py`) |
