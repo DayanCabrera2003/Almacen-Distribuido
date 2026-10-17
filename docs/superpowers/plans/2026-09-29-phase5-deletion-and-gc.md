@@ -246,7 +246,7 @@ round's purge becomes a candidate in the same round rather than the next one.
 
 **Files:** Create `tests/integration/cluster/test_no_resurrection.py`
 
-- [ ] **Step 1: Write the tests**, using the real anti-entropy path rather than
+- [x] **Step 1: Write the tests**, using the real anti-entropy path rather than
 calling merge directly, because the hazard lives in the interaction:
 
 - A tombstone purged **after** the TTL, with the peer having already seen it,
@@ -259,7 +259,7 @@ calling merge directly, because the hazard lives in the interaction:
   needed.
 - With the TTL respected, gossip after the purge leaves both sides with nothing.
 
-- [ ] **Step 2: Run tests, commit**
+- [x] **Step 2: Run tests, commit**
 
 ---
 
