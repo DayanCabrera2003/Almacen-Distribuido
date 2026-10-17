@@ -9,6 +9,7 @@ from datetime import timedelta
 import structlog
 from fastapi import FastAPI
 
+from almacen.api.routers import cluster as cluster_router
 from almacen.api.routers import files as files_router
 from almacen.api.routers import tags as tags_router
 from almacen.cluster.channels import ChannelPool
@@ -128,6 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(files_router.router)
     app.include_router(tags_router.router)
+    app.include_router(cluster_router.router)
 
     return app
 

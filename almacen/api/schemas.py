@@ -27,6 +27,51 @@ class AddTagsRequest(BaseModel):
     tags: list[str]
 
 
+class MemberStatus(BaseModel):
+    node_id: str
+    # None for a peer learned through gossip but absent from ALMACEN_PEERS.
+    address: str | None
+    state: str
+    incarnation: int
+    # When this node last saw the state change; None if it never has.
+    since: datetime | None
+    is_self: bool
+
+
+class ReplicationSettings(BaseModel):
+    replication_factor: int
+    write_quorum: int
+    rpc_timeout_seconds: float
+
+
+class GossipSettings(BaseModel):
+    enabled: bool
+    interval_seconds: float
+    fanout: int
+    suspicion_timeout_seconds: float
+    blob_catchup_budget: int
+
+
+class GCSettings(BaseModel):
+    grace_ttl_seconds: float
+    budget: int
+
+
+class StorageCounts(BaseModel):
+    live_records: int
+    tombstones: int
+    blobs: int
+
+
+class ClusterStatus(BaseModel):
+    node_id: str
+    members: list[MemberStatus]
+    replication: ReplicationSettings
+    gossip: GossipSettings
+    gc: GCSettings
+    storage: StorageCounts
+
+
 def to_file_metadata(record: FileRecord) -> FileMetadata:
     return FileMetadata(
         file_id=record.file_id,

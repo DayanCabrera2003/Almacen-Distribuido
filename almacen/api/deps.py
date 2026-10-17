@@ -7,9 +7,12 @@ from collections.abc import Callable
 
 from fastapi import HTTPException, Request
 
+from almacen.cluster.membership import Membership
 from almacen.cluster.replication_client import ReplicationClient
+from almacen.config import Settings
 from almacen.domain.file_record import FileRecord
 from almacen.storage.blob_store import BlobStore
+from almacen.storage.metadata_store import MetadataStore
 from almacen.storage.protocols import MetadataStoreLike
 from almacen.storage.tag_index import TagIndex
 
@@ -33,6 +36,19 @@ def get_tag_index(request: Request) -> TagIndex:
 
 def get_replication_client(request: Request) -> ReplicationClient:
     return request.app.state.replication_client
+
+
+def get_settings(request: Request) -> Settings:
+    return request.app.state.settings
+
+
+def get_membership(request: Request) -> Membership:
+    return request.app.state.membership
+
+
+def get_local_metadata_store(request: Request) -> MetadataStore:
+    """The node's own replica, for reads that must not touch the network."""
+    return request.app.state.local_metadata_store
 
 
 def get_live_record(
