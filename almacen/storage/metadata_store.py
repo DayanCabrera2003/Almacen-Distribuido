@@ -64,6 +64,10 @@ _COLUMNS = (
 )
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM files WHERE file_id = ?"
 
+# File ids bound per `IN (...)` when reading tag state in bulk. Well under
+# SQLite's historical 999-parameter limit, so it holds on any build.
+_ID_BATCH_SIZE = 500
+
 
 def _dt_to_str(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
@@ -90,7 +94,7 @@ class MetadataStore:
     def get(self, file_id: uuid.UUID) -> FileRecord | None:
         with self._lock:
             row = self._conn.execute(_SELECT_ONE, (str(file_id),)).fetchone()
-            return self._row_to_record(row) if row else None
+            return self._decode_one(row) if row else None
 
     def update(self, record: FileRecord) -> None:
         """Write the record as given, replacing whatever is stored.
@@ -121,7 +125,7 @@ class MetadataStore:
             if row is None:
                 return None
 
-            record = self._row_to_record(row)
+            record = self._decode_one(row)
             mutator(record)
             self._write(record)
             return record
@@ -154,7 +158,7 @@ class MetadataStore:
                 self._insert_locked(incoming)
                 return incoming
 
-            merged = self._row_to_record(row).merged(incoming)
+            merged = self._decode_one(row).merged(incoming)
             self._write(merged)
             return merged
 
@@ -163,7 +167,7 @@ class MetadataStore:
             rows = self._conn.execute(
                 f"SELECT {_COLUMNS} FROM files WHERE tombstone = 0"
             ).fetchall()
-            return [self._row_to_record(row) for row in rows]
+            return self._decode_rows(rows)
 
     def record_counts(self) -> tuple[int, int]:
         """`(live, tombstoned)` record counts, without decoding any record.
@@ -188,7 +192,7 @@ class MetadataStore:
         """
         with self._lock:
             rows = self._conn.execute(f"SELECT {_COLUMNS} FROM files").fetchall()
-            return [self._row_to_record(row) for row in rows]
+            return self._decode_rows(rows)
 
     def purge(self, file_id: uuid.UUID) -> bool:
         """Delete a record and its tag occurrences outright.
@@ -305,7 +309,32 @@ class MetadataStore:
                 [(file_id, tag, node_id, counter) for tag, node_id, counter in occurrences],
             )
 
-    def _row_to_record(self, row: tuple) -> FileRecord:
+    def _decode_one(self, row: tuple) -> FileRecord:
+        return self._decode_rows([row])[0]
+
+    def _decode_rows(self, rows: list[tuple]) -> list[FileRecord]:
+        """Rebuild records from `files` rows, reading their tag state in batches.
+
+        Reading each record's occurrences separately costs 2N+1 statements for
+        a listing of N records (the N+1 pattern, twice over); this issues two
+        per batch of `_ID_BATCH_SIZE` records instead.
+        """
+        file_ids = [row[0] for row in rows]
+        adds = self._read_occurrences("file_tag_adds", file_ids)
+        removes = self._read_occurrences("file_tag_removes", file_ids)
+        return [
+            self._row_to_record(
+                row, adds.get(row[0], set()), removes.get(row[0], set())
+            )
+            for row in rows
+        ]
+
+    def _row_to_record(
+        self,
+        row: tuple,
+        adds: set[tuple[str, str, int]],
+        removes: set[tuple[str, str, int]],
+    ) -> FileRecord:
         (
             file_id_str,
             name,
@@ -331,20 +360,24 @@ class MetadataStore:
             tombstone_register=LWWRegister(
                 bool(tombstone), _str_to_dt(tombstone_ts), tombstone_node
             ),
-            tag_set=OrSet(
-                adds=self._read_occurrences("file_tag_adds", file_id_str),
-                removes=self._read_occurrences("file_tag_removes", file_id_str),
-            ),
+            tag_set=OrSet(adds=adds, removes=removes),
             vector_clock=VectorClock(json.loads(vector_clock)),
             created_at=_str_to_dt(created_at),
             updated_at=_str_to_dt(updated_at),
         )
 
-    def _read_occurrences(self, table: str, file_id: str) -> set[tuple[str, str, int]]:
-        return {
-            (tag, node_id, counter)
-            for tag, node_id, counter in self._conn.execute(
-                f"SELECT tag, node_id, counter FROM {table} WHERE file_id = ?",
-                (file_id,),
-            ).fetchall()
-        }
+    def _read_occurrences(
+        self, table: str, file_ids: list[str]
+    ) -> dict[str, set[tuple[str, str, int]]]:
+        """Every occurrence in `table` for `file_ids`, grouped by file id."""
+        grouped: dict[str, set[tuple[str, str, int]]] = {}
+        for start in range(0, len(file_ids), _ID_BATCH_SIZE):
+            batch = file_ids[start : start + _ID_BATCH_SIZE]
+            placeholders = ", ".join("?" * len(batch))
+            for file_id, tag, node_id, counter in self._conn.execute(
+                f"SELECT file_id, tag, node_id, counter FROM {table} "
+                f"WHERE file_id IN ({placeholders})",
+                batch,
+            ).fetchall():
+                grouped.setdefault(file_id, set()).add((tag, node_id, counter))
+        return grouped
