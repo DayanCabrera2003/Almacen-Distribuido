@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir --no-deps .
 
 # Blobs and the SQLite database live here; mounted as a volume per node.
 ENV ALMACEN_DATA_DIR=/data
+# One JSON object per line, so `docker logs` output can be filtered by event
+# and node. Override with -e ALMACEN_LOG_FORMAT=console for readable output.
+ENV ALMACEN_LOG_FORMAT=json
 RUN mkdir -p /data
 
 EXPOSE 8000 50051
