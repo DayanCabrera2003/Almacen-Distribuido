@@ -2,7 +2,6 @@
 """One push-pull gossip round, and the loop that drives it (spec §11)."""
 from __future__ import annotations
 
-import logging
 import random
 import threading
 import uuid
@@ -10,6 +9,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 import grpc
+import structlog
 
 from almacen.cluster.channels import ChannelPool
 from almacen.cluster.gc import collect, is_expired_tombstone
@@ -18,6 +18,7 @@ from almacen.cluster.placement import replica_set
 from almacen.cluster.reconciliation import build_digest
 from almacen.cluster.replication_client import ReplicationClient
 from almacen.config import Peer, Settings
+from almacen.observability import describe_error
 from almacen.rpc import cluster_pb2 as pb
 from almacen.rpc import cluster_pb2_grpc as pb_grpc
 from almacen.rpc.gossip_codec import (
@@ -30,7 +31,7 @@ from almacen.storage.blob_store import BlobStore
 from almacen.storage.gc_state import BlobGCState
 from almacen.storage.metadata_store import MetadataStore
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def gossip_once(
@@ -48,6 +49,7 @@ def gossip_once(
     this phase exists to handle, and the caller is a background thread: an
     exception escaping here would stop that node gossiping for good, silently.
     """
+    log = logger.bind(node_id=settings.node_id, peer=peer.node_id)
     local_records = store.list_all()
     request = pb.GossipDigest(
         from_node_id=settings.node_id,
@@ -59,7 +61,7 @@ def gossip_once(
         stub = pb_grpc.ClusterStub(channels.channel(peer.address))
         delta = stub.Gossip(request, timeout=settings.rpc_timeout_seconds)
     except grpc.RpcError as error:
-        logger.info("gossip with %s failed: %s", peer.node_id, error)
+        log.info("gossip_round_failed", stage="exchange", error=describe_error(error))
         membership.record_unreachable(peer.node_id, now)
         return False
 
@@ -84,15 +86,20 @@ def gossip_once(
         # Push: send back what the peer said it is behind on. ReplicateRecord
         # already merges on the far side, so no new transfer path is needed.
         wanted = {uuid.UUID(raw) for raw in delta.wanted_file_ids}
+        pushed = 0
         for record in local_records:
             if record.file_id in wanted:
                 stub.ReplicateRecord(
                     record_to_message(record), timeout=settings.rpc_timeout_seconds
                 )
+                pushed += 1
     except (grpc.RpcError, ValueError) as error:
-        logger.warning("gossip with %s failed mid-exchange: %s", peer.node_id, error)
+        log.warning(
+            "gossip_round_failed", stage="reconcile", error=describe_error(error)
+        )
         return False
 
+    log.info("gossip_round_completed", pulled=len(delta.records), pushed=pushed)
     return True
 
 
@@ -132,7 +139,11 @@ def catch_up_blobs(
         if content is not None:
             blob_store.put(content)
             fetched += 1
-            logger.info("caught up blob %s", record.content_hash[:12])
+            logger.info(
+                "blob_caught_up",
+                node_id=settings.node_id,
+                content_hash=record.content_hash[:12],
+            )
     return fetched
 
 
@@ -206,7 +217,11 @@ class GossipLoop:
                 # gossip_once already handles the expected failures; this is the
                 # backstop for the unexpected. One bad peer must not end the
                 # loop, and an escaped exception would do exactly that.
-                logger.exception("unexpected failure gossiping with %s", peer.node_id)
+                logger.exception(
+                    "gossip_round_crashed",
+                    node_id=self._settings.node_id,
+                    peer=peer.node_id,
+                )
 
         if self._stop.is_set():
             return
@@ -220,7 +235,7 @@ class GossipLoop:
                 should_stop=self._stop.is_set,
             )
         except Exception:  # noqa: BLE001
-            logger.exception("unexpected failure catching up blobs")
+            logger.exception("blob_catchup_crashed", node_id=self._settings.node_id)
 
         if self._stop.is_set():
             return

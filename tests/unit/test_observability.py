@@ -2,10 +2,15 @@ import io
 import json
 import logging
 
+import grpc
 import pytest
 import structlog
 
-from almacen.observability import configure_logging, configure_logging_from_env
+from almacen.observability import (
+    configure_logging,
+    configure_logging_from_env,
+    describe_error,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +105,20 @@ def test_an_unknown_format_is_rejected(fmt):
 def test_an_unknown_level_is_rejected():
     with pytest.raises(ValueError, match="log level"):
         configure_logging(level="LOUD", fmt="json", node_id="node1")
+
+
+def test_describe_error_reduces_a_grpc_error_to_its_status_code():
+    class Unavailable(grpc.RpcError):
+        def code(self):
+            return grpc.StatusCode.UNAVAILABLE
+
+    assert describe_error(Unavailable("long\nmultiline\ndebug string")) == "UNAVAILABLE"
+
+
+def test_describe_error_falls_back_to_the_message():
+    assert describe_error(ValueError("bad record")) == "bad record"
+    # A bare RpcError carries no status code at all.
+    assert describe_error(grpc.RpcError("went away")) == "went away"
 
 
 def test_from_env_reads_format_level_and_node_id(monkeypatch):

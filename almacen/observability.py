@@ -104,3 +104,18 @@ def configure_logging_from_env(stream: TextIO | None = None) -> None:
         node_id=os.environ.get("ALMACEN_NODE_ID", DEFAULT_NODE_ID),
         stream=stream,
     )
+
+
+def describe_error(error: BaseException) -> str:
+    """A short, stable value for an `error` field.
+
+    A gRPC error's string form spans several lines of debug detail; its status
+    code is what a reader filters on. Anything else falls back to its message.
+    """
+    code = getattr(error, "code", None)
+    if callable(code):
+        try:
+            return code().name
+        except Exception:  # noqa: BLE001 - some RpcErrors carry no status
+            pass
+    return str(error)
