@@ -8,10 +8,11 @@ brief.
 
 ## Status
 
-Phases 1-5 are complete, and Phase 6 (polish) is under way: deleted files and
-orphaned content are reclaimed without letting a node returning from a
-partition undo a delete, and each node reports its view of the cluster and logs
-structured events.
+All six phases are complete: deleted files and orphaned content are reclaimed
+without letting a node returning from a partition undo a delete, each node
+reports its view of the cluster and logs structured events, a command-line
+client operates the cluster, and seeded chaos tests check convergence under
+random partitions and crashes.
 
 Content is stored on R=3 of N=5 nodes chosen by rendezvous hashing, acknowledged
 after W=2 replicas confirm. Metadata is replicated in full to every node, so any
