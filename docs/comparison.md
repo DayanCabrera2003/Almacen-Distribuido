@@ -334,8 +334,8 @@ complete:
   design uses a strict replica set, so a write fails if two of its three
   replicas are down. Dynamo returns conflicting versions (siblings) to the
   client for reconciliation; this design merges automatically with CRDTs and
-  logs the LWW conflicts it detects when a record is pushed to a node
-  (not those first met on the gossip pull). Dynamo uses Merkle trees for anti-entropy; this design
+  logs every LWW conflict it detects, on whichever path the record arrives.
+  Dynamo uses Merkle trees for anti-entropy; this design
   exchanges a flat `file_id → vector clock` digest and defers Merkle trees.
 - **Rendezvous hashing** (Thaler and Ravishankar, 1998) — placement.
 - **SWIM** (Das, Gupta and Motivala, DSN 2002) — suspicion before declaring a

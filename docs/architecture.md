@@ -408,15 +408,13 @@ other has?" exactly, and is used for two things:
 
 - **Anti-entropy**: comparing clocks decides which records two nodes need to
   exchange (section 11).
-- **Conflict visibility**: when a record arrives through `ReplicateRecord` and
-  its clock is concurrent with the local one, the node logs a
-  `concurrent_update_resolved` warning with both clocks before resolving by
-  LWW, so a discarded concurrent write is visible in the logs rather than
-  silent. Only that receive path logs. `ReplicateRecord` carries both direct
-  pushes and the push half of a gossip exchange, so a conflict is logged by the
-  gossip *responder*; the pull half (the initiator merging the records in the
-  responder's reply, in `gossip_once`) merges without checking, so a conflict
-  first detected there is resolved identically but silently on that node.
+- **Conflict visibility**: when a remote record's clock is concurrent with the
+  local one, the node logs a `concurrent_update_resolved` warning with both
+  clocks before resolving by LWW, so a discarded concurrent write is visible in
+  the logs rather than silent. Both receive paths check, through the shared
+  `almacen/cluster/conflicts.py`: `ReplicateRecord` (direct pushes and the push
+  half of a gossip exchange, logged by the responder) and the pull half in
+  `gossip_once` (logged by the initiator, with the responder as `sender`).
 
 The clock deliberately does **not** take part in the merge. An earlier version
 of the spec let a dominating clock win outright; that rule breaks
@@ -763,9 +761,9 @@ orphan. The README's Test section explains how to run it and reproduce a seed.
   Same-node read-your-writes does hold.
 - **Preservation of both sides of a concurrent rename or content change.** LWW
   keeps one; the other is not surfaced to clients. Dynamo-style sibling
-  versions are out of scope. The conflict is logged only when it is detected on
-  the `ReplicateRecord` path, not on the gossip pull (section 8), so the log is
-  not a complete record of every conflict.
+  versions are out of scope. The conflict is logged on every receive path
+  (section 8), but only on the node that detects it: a conflict between two
+  nodes shows up in whichever node's log merged the other's version first.
 - **Which concurrent write wins is clock-dependent.** Between genuinely
   concurrent writes, the node with the faster clock wins. A node with a badly
   fast clock drags a record's timestamps forward.
@@ -954,7 +952,7 @@ raw API response instead of a table. `status` reports a node that does not serve
 | `almacen/domain/` | `FileRecord`: the CRDT-backed entity, mutations and merge. No I/O. |
 | `almacen/crdt/` | `LWWRegister`, `OrSet`, `VectorClock`. Pure. |
 | `almacen/storage/` | `BlobStore` (filesystem), `MetadataStore` (SQLite: records, merge, purge, reference counts), `TagIndex` (queries), `BlobGCState` (SQLite: GC candidates and when each became one) |
-| `almacen/cluster/` | Placement (HRW), replication client (W-of-R), metadata replicator, membership, reconciliation, gossip loop and blob catch-up (`gossip.py`), GC rules and collector (`gc.py`) |
+| `almacen/cluster/` | Placement (HRW), replication client (W-of-R), metadata replicator, membership, reconciliation, gossip loop and blob catch-up (`gossip.py`), GC rules and collector (`gc.py`), conflict logging (`conflicts.py`) |
 | `almacen/rpc/` | Protos, generated stubs, servicers (`ReplicateRecord` and `Gossip` apply the expired-tombstone refusal), codecs between records and messages |
 | `almacen/api/` | FastAPI routers (`files`, `tags`, `cluster`), schemas, dependency providers |
 | `almacen/cli/` | `almacen-cli`: Typer commands per resource, `NodeClient` with connection-only failover, output rendering |
