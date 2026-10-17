@@ -338,22 +338,22 @@ resurrect deleted files.
 
 ### Task 8: Full verification
 
-- [ ] `pytest -q` — no failures, no skips.
-- [ ] No test sleeps (the one `time.sleep(0)` in the membership test is a GIL
+- [x] `pytest -q` — no failures, no skips.
+- [x] No test sleeps (the one `time.sleep(0)` in the membership test is a GIL
       yield, not a wait).
-- [ ] The resurrection test fails if the grace check in `records_to_purge` is
+- [x] The resurrection test fails if the grace check in `records_to_purge` is
       removed.
-- [ ] The repository hygiene check from the project rules file.
+- [x] The repository hygiene check from the project rules file.
 
 ---
 
 ## Definition of done
 
-- [ ] A tombstoned record older than the grace TTL is purged; a younger one is not.
-- [ ] A blob orphaned by a purge is deleted one TTL after the purge, not before.
-- [ ] A blob orphaned by a `PATCH` repoint is deleted one TTL after the repoint.
-- [ ] A blob that regains a referrer is not deleted.
-- [ ] Purging within the TTL is shown to resurrect a file, and purging after it is shown not to.
-- [ ] GC runs on the gossip loop, is budgeted, and leaks no threads.
+- [x] A tombstoned record older than the grace TTL is purged; a younger one is not.
+- [x] A blob orphaned by a purge is deleted one TTL after the purge, not before.
+- [x] A blob orphaned by a `PATCH` repoint is deleted one TTL after the repoint.
+- [x] A blob that regains a referrer is not deleted.
+- [x] Purging within the TTL is shown to resurrect a file, and purging after it is shown not to.
+- [x] GC runs on the gossip loop, is budgeted, and leaks no threads.
 - [ ] Both new DAA notes exist, and the two stale claims in the existing notes are corrected.
-- [ ] The hygiene rules from the project rules file are satisfied.
+- [x] The hygiene rules from the project rules file are satisfied.
