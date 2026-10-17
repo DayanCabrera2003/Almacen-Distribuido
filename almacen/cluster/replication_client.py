@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import grpc
+import structlog
 
 from almacen.cluster.channels import ChannelPool
 from almacen.cluster.placement import replica_set
 from almacen.config import Settings
+from almacen.observability import describe_error
 from almacen.rpc import replication_pb2 as pb
 from almacen.rpc import replication_pb2_grpc as pb_grpc
 from almacen.rpc.replication_servicer import CHUNK_SIZE
 from almacen.storage.blob_store import BlobStore
-
-logger = logging.getLogger(__name__)
 
 
 class QuorumNotReached(RuntimeError):
@@ -33,6 +32,7 @@ class ReplicationClient:
         self._settings = settings
         self._blob_store = blob_store
         self._channels = channels or ChannelPool()
+        self._log = structlog.get_logger(__name__, node_id=settings.node_id)
 
     def put_blob(self, content: bytes) -> str:
         """Write content to its replica set, requiring W acknowledgements.
@@ -73,6 +73,13 @@ class ReplicationClient:
                 acknowledged += sum(1 for succeeded in results if succeeded)
 
         if acknowledged < required:
+            self._log.warning(
+                "write_quorum_not_reached",
+                content_hash=content_hash[:12],
+                acknowledged=acknowledged,
+                required=required,
+                replicas=replicas,
+            )
             # The replicas that did accept the write keep their copy, and no
             # metadata will ever point at it. Those bytes are unreferenced until
             # Phase 5's reference-counting GC collects them; rolling them back
@@ -100,10 +107,7 @@ class ReplicationClient:
         if local is not None and _matches(local, content_hash):
             return local
         if local is not None:
-            logger.error(
-                "local copy of %s is corrupt, falling back to a replica",
-                content_hash[:12],
-            )
+            self._log.error("blob_local_copy_corrupt", content_hash=content_hash[:12])
 
         # HRW order doubles as a preference order: every node tries the replicas
         # in the same sequence, so reads concentrate on the same node and benefit
@@ -121,7 +125,7 @@ class ReplicationClient:
     def _put_remote(self, node_id: str, content: bytes, content_hash: str) -> bool:
         address = self._settings.peer_address(node_id)
         if address is None:
-            logger.warning("no address known for replica %s", node_id)
+            self._log.warning("blob_replica_unknown", replica=node_id)
             return False
         try:
             stub = pb_grpc.ReplicationStub(self._channels.channel(address))
@@ -130,8 +134,11 @@ class ReplicationClient:
         except grpc.RpcError as error:
             # Swallowed on purpose: a single failed replica is not a failed
             # write, it is one fewer acknowledgement. The quorum check decides.
-            logger.warning(
-                "replica %s rejected blob %s: %s", node_id, content_hash[:12], error
+            self._log.warning(
+                "blob_replication_failed",
+                replica=node_id,
+                content_hash=content_hash[:12],
+                error=describe_error(error),
             )
             return False
 
@@ -149,18 +156,19 @@ class ReplicationClient:
                 )
             )
         except grpc.RpcError as error:
-            logger.info(
-                "replica %s could not serve %s: %s", node_id, content_hash[:12], error
+            self._log.info(
+                "blob_fetch_failed",
+                replica=node_id,
+                content_hash=content_hash[:12],
+                error=describe_error(error),
             )
             return None
 
         # Same check as on the local path: turns silent corruption into a miss,
         # so the caller falls through to the next replica.
         if not _matches(received, content_hash):
-            logger.error(
-                "replica %s served content that does not match %s",
-                node_id,
-                content_hash[:12],
+            self._log.error(
+                "blob_replica_corrupt", replica=node_id, content_hash=content_hash[:12]
             )
             return None
         return received

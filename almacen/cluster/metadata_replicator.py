@@ -2,18 +2,17 @@
 """Pushes metadata records to every peer (spec §4: full metadata replication)."""
 from __future__ import annotations
 
-import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import grpc
+import structlog
 
 from almacen.cluster.channels import ChannelPool
 from almacen.config import Settings
 from almacen.domain.file_record import FileRecord
+from almacen.observability import describe_error
 from almacen.rpc import cluster_pb2_grpc as pb_grpc
 from almacen.rpc.record_codec import record_to_message
-
-logger = logging.getLogger(__name__)
 
 
 class MetadataReplicator:
@@ -29,6 +28,7 @@ class MetadataReplicator:
     def __init__(self, settings: Settings, channels: ChannelPool | None = None) -> None:
         self._settings = settings
         self._channels = channels or ChannelPool()
+        self._log = structlog.get_logger(__name__, node_id=settings.node_id)
 
     def replicate(self, record: FileRecord) -> None:
         peers = self._settings.remote_peers
@@ -46,11 +46,11 @@ class MetadataReplicator:
             stub = pb_grpc.ClusterStub(self._channels.channel(peer.address))
             stub.ReplicateRecord(message, timeout=self._settings.rpc_timeout_seconds)
         except grpc.RpcError as error:
-            logger.warning(
-                "could not replicate record %s to %s: %s",
-                message.file_id,
-                peer.node_id,
-                error,
+            self._log.warning(
+                "record_replication_failed",
+                peer=peer.node_id,
+                file_id=message.file_id,
+                error=describe_error(error),
             )
 
     def close(self) -> None:
