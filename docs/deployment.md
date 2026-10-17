@@ -60,6 +60,7 @@ the same set of nodes everywhere or nodes would disagree on where a blob lives.
         -e ALMACEN_WRITE_QUORUM=2 \
         -e ALMACEN_GOSSIP_INTERVAL_SECONDS=2 \
         -e ALMACEN_SUSPICION_TIMEOUT_SECONDS=6 \
+        -e ALMACEN_GRACE_TTL_SECONDS=20 \
         almacen:latest
     done
 
@@ -73,6 +74,7 @@ What each flag decides:
 | `-v almacen-node$i-data:/data` | The node's durable state |
 | `-e ALMACEN_NODE_ID` | Which entry of the peer list is "me" |
 | `-e ALMACEN_GOSSIP_INTERVAL_SECONDS=2`, `..._SUSPICION_TIMEOUT_SECONDS=6` | Shortened from the production defaults (5s / 15s) so reconciliation and failure detection are observable within a demo session |
+| `-e ALMACEN_GRACE_TTL_SECONDS=20` | **Demo value only.** Shortened from the 24h default so a tombstone purge and a blob collection happen within a demo session. See the warning in section 7 |
 
 The full list of variables is in the README's Configuration section.
 
@@ -99,12 +101,52 @@ Disconnecting a container from the network isolates it from every peer:
 
 The README walks through the full partition-and-heal demo.
 
-## 7. Stop a node, bring it back
+## 7. Watch a delete being garbage-collected
+
+A `DELETE` only tombstones the record; nothing leaves the disk yet. With the
+20-second grace TTL above:
+
+    FILE_ID=$(curl -s -F "file=@README.md" -F "name=doomed.md" \
+      http://127.0.0.1:8001/files \
+      | python3 -c "import sys,json; print(json.load(sys.stdin)['file_id'])")
+    HASH=$(sha256sum README.md | cut -d' ' -f1)
+
+    curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://127.0.0.1:8001/files/$FILE_ID
+    curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8002/files/$FILE_ID   # 404 once gossiped
+
+    # Per node: is the record still stored (as a tombstone), is the blob on disk?
+    state() { for i in 1 2 3 4 5; do printf "node$i rec=%s blob=%s\n" \
+      "$(docker exec node$i python -c "import sqlite3; print(len(sqlite3.connect('/data/metadata.db').execute('select 1 from files where file_id=?', ('$FILE_ID',)).fetchall()))")" \
+      "$(docker exec node$i ls /data/blobs | grep -c $HASH)"; done; }
+
+    state             # rec=1 on every node, blob=1 on its 3 replicas
+    sleep 25; state   # rec=0 everywhere; blobs still on disk, now GC candidates
+    sleep 25; state   # blob=0 everywhere
+
+After one TTL (plus a gossip tick) every node purges the tombstoned record, and
+each replica's blob becomes a *candidate* — still on disk, listed in the node's
+`/data/gc_state.db`. After a second TTL the blobs are deleted. Measured on this
+setup: records gone about 22s after the delete, blobs about 42s after. A blob
+therefore outlives its delete by roughly two TTLs, on purpose: the record's TTL
+protects nodes that have not heard of the delete, and the blob's protects nodes
+that may still need to read it.
+
+A `PATCH` that replaces a file's content orphans the old blob the same way, but
+it is deleted one TTL after the `PATCH`: the record is still live, it just
+points at the new content.
+
+**Do not lower the TTL like this outside a demo.** A tombstone purged before it
+reached a partitioned node is indistinguishable from a file that node never
+saw, so when the partition heals that node teaches the file back — as a live
+file. The grace TTL must exceed the longest partition the deployment expects to
+survive; the 24h default is that margin.
+
+## 8. Stop a node, bring it back
 
     docker stop node3        # crash: the others suspect, then declare it dead
     docker start node3       # recovery: same container, same volume, same data
 
-## 8. Tear down
+## 9. Tear down
 
     docker rm -f node1 node2 node3 node4 node5
     docker network rm almacen-net

@@ -319,13 +319,13 @@ not keep.
 
 **Files:** Modify `docs/deployment.md`, `README.md`
 
-- [ ] **Step 1: Short TTL in the demo deployment** — add
+- [x] **Step 1: Short TTL in the demo deployment** — add
 `-e ALMACEN_GRACE_TTL_SECONDS=20` to the `docker run` commands in
 `docs/deployment.md` and the README, so a delete, a purge and a blob collection
 are all observable in a demo session. State there that this is a demo value and
 that 24h is the default for a reason.
 
-- [ ] **Step 2: Verify by hand** — upload, delete, confirm the blob is still on
+- [x] **Step 2: Verify by hand** — upload, delete, confirm the blob is still on
 disk, wait past two TTLs, confirm the record and then the blob are gone.
 
 - [ ] **Step 3: README** — Phase 5 status, the new variables, the demo, and an
