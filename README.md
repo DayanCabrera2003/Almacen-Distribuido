@@ -250,3 +250,13 @@ Notes:
       unit/              # crdt, domain, config, placement, codec — no I/O
       integration/       # storage, rpc, cluster, API
       cluster/           # five-node end-to-end
+
+## Further reading
+
+- [docs/architecture.md](docs/architecture.md) — the system end to end: node
+  anatomy, data model, placement, read/write paths, CRDT convergence,
+  membership, anti-entropy, deletion and GC, and what is and is not guaranteed.
+- [docs/comparison.md](docs/comparison.md) — comparison with CephFS, IPFS and
+  semantic/tag-based file systems, as requested by the assignment.
+- [docs/deployment.md](docs/deployment.md) — deploying a cluster by hand with
+  `docker run`.
