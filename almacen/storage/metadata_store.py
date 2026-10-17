@@ -64,6 +64,38 @@ _COLUMNS = (
 )
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM files WHERE file_id = ?"
 
+# Live files whose visible tags match a query: the inverted-index read path.
+#
+# - `a.tag IN (...)` seeks `idx_file_tag_adds_tag`, touching only the postings
+#   of the queried tags rather than every live file.
+# - The NOT EXISTS anti-join keeps an add occurrence only if no remove carries
+#   the same full occurrence (file_id, tag, node_id, counter) — a primary-key
+#   probe into `file_tag_removes`. That is exactly `adds - removes` in
+#   `OrSet.value()`, so a concurrent add that a remove never observed survives.
+# - GROUP BY file_id deduplicates (a tag can have several surviving adds); for
+#   AND, `{having}` keeps files that matched all k distinct query tags, which is
+#   relational division as a count. The caller passes distinct tags, so k is
+#   the right target.
+# - Tombstoned files are excluded on the outer, primary-key lookup of `files`.
+_TAG_MATCH = f"""
+SELECT {_COLUMNS} FROM files
+WHERE tombstone = 0 AND file_id IN (
+    SELECT a.file_id FROM file_tag_adds AS a
+    WHERE a.tag IN ({{placeholders}})
+      AND NOT EXISTS (
+          SELECT 1 FROM file_tag_removes AS r
+          WHERE r.file_id = a.file_id AND r.tag = a.tag
+            AND r.node_id = a.node_id AND r.counter = a.counter
+      )
+    GROUP BY a.file_id
+    {{having}}
+)
+"""
+
+# File ids bound per `IN (...)` when reading tag state in bulk. Well under
+# SQLite's historical 999-parameter limit, so it holds on any build.
+_ID_BATCH_SIZE = 500
+
 
 def _dt_to_str(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
@@ -90,7 +122,7 @@ class MetadataStore:
     def get(self, file_id: uuid.UUID) -> FileRecord | None:
         with self._lock:
             row = self._conn.execute(_SELECT_ONE, (str(file_id),)).fetchone()
-            return self._row_to_record(row) if row else None
+            return self._decode_one(row) if row else None
 
     def update(self, record: FileRecord) -> None:
         """Write the record as given, replacing whatever is stored.
@@ -121,7 +153,7 @@ class MetadataStore:
             if row is None:
                 return None
 
-            record = self._row_to_record(row)
+            record = self._decode_one(row)
             mutator(record)
             self._write(record)
             return record
@@ -154,7 +186,7 @@ class MetadataStore:
                 self._insert_locked(incoming)
                 return incoming
 
-            merged = self._row_to_record(row).merged(incoming)
+            merged = self._decode_one(row).merged(incoming)
             self._write(merged)
             return merged
 
@@ -163,7 +195,28 @@ class MetadataStore:
             rows = self._conn.execute(
                 f"SELECT {_COLUMNS} FROM files WHERE tombstone = 0"
             ).fetchall()
-            return [self._row_to_record(row) for row in rows]
+            return self._decode_rows(rows)
+
+    def find_live_by_tags(self, tags: set[str], *, match_all: bool) -> list[FileRecord]:
+        """Live records carrying all (`match_all`) or any of `tags`.
+
+        Answered from the tag tables instead of decoding every live record: a
+        tag is visible on a file iff some add occurrence of it is not cancelled
+        by a remove of that exact occurrence — the OR-Set's `value()`,
+        evaluated per occurrence by the anti-join below. Only the matching
+        records are then decoded. See `_TAG_MATCH` for the query itself.
+        """
+        if not tags:
+            raise ValueError("find_live_by_tags needs at least one tag")
+        wanted = sorted(tags)
+        placeholders = ", ".join("?" * len(wanted))
+        having = "HAVING COUNT(DISTINCT a.tag) = ?" if match_all else ""
+        params: list[object] = [*wanted, *([len(wanted)] if match_all else [])]
+        with self._lock:
+            rows = self._conn.execute(
+                _TAG_MATCH.format(placeholders=placeholders, having=having), params
+            ).fetchall()
+            return self._decode_rows(rows)
 
     def record_counts(self) -> tuple[int, int]:
         """`(live, tombstoned)` record counts, without decoding any record.
@@ -188,7 +241,7 @@ class MetadataStore:
         """
         with self._lock:
             rows = self._conn.execute(f"SELECT {_COLUMNS} FROM files").fetchall()
-            return [self._row_to_record(row) for row in rows]
+            return self._decode_rows(rows)
 
     def purge(self, file_id: uuid.UUID) -> bool:
         """Delete a record and its tag occurrences outright.
@@ -305,7 +358,32 @@ class MetadataStore:
                 [(file_id, tag, node_id, counter) for tag, node_id, counter in occurrences],
             )
 
-    def _row_to_record(self, row: tuple) -> FileRecord:
+    def _decode_one(self, row: tuple) -> FileRecord:
+        return self._decode_rows([row])[0]
+
+    def _decode_rows(self, rows: list[tuple]) -> list[FileRecord]:
+        """Rebuild records from `files` rows, reading their tag state in batches.
+
+        Reading each record's occurrences separately costs 2N+1 statements for
+        a listing of N records (the N+1 pattern, twice over); this issues two
+        per batch of `_ID_BATCH_SIZE` records instead.
+        """
+        file_ids = [row[0] for row in rows]
+        adds = self._read_occurrences("file_tag_adds", file_ids)
+        removes = self._read_occurrences("file_tag_removes", file_ids)
+        return [
+            self._row_to_record(
+                row, adds.get(row[0], set()), removes.get(row[0], set())
+            )
+            for row in rows
+        ]
+
+    def _row_to_record(
+        self,
+        row: tuple,
+        adds: set[tuple[str, str, int]],
+        removes: set[tuple[str, str, int]],
+    ) -> FileRecord:
         (
             file_id_str,
             name,
@@ -331,20 +409,24 @@ class MetadataStore:
             tombstone_register=LWWRegister(
                 bool(tombstone), _str_to_dt(tombstone_ts), tombstone_node
             ),
-            tag_set=OrSet(
-                adds=self._read_occurrences("file_tag_adds", file_id_str),
-                removes=self._read_occurrences("file_tag_removes", file_id_str),
-            ),
+            tag_set=OrSet(adds=adds, removes=removes),
             vector_clock=VectorClock(json.loads(vector_clock)),
             created_at=_str_to_dt(created_at),
             updated_at=_str_to_dt(updated_at),
         )
 
-    def _read_occurrences(self, table: str, file_id: str) -> set[tuple[str, str, int]]:
-        return {
-            (tag, node_id, counter)
-            for tag, node_id, counter in self._conn.execute(
-                f"SELECT tag, node_id, counter FROM {table} WHERE file_id = ?",
-                (file_id,),
-            ).fetchall()
-        }
+    def _read_occurrences(
+        self, table: str, file_ids: list[str]
+    ) -> dict[str, set[tuple[str, str, int]]]:
+        """Every occurrence in `table` for `file_ids`, grouped by file id."""
+        grouped: dict[str, set[tuple[str, str, int]]] = {}
+        for start in range(0, len(file_ids), _ID_BATCH_SIZE):
+            batch = file_ids[start : start + _ID_BATCH_SIZE]
+            placeholders = ", ".join("?" * len(batch))
+            for file_id, tag, node_id, counter in self._conn.execute(
+                f"SELECT file_id, tag, node_id, counter FROM {table} "
+                f"WHERE file_id IN ({placeholders})",
+                batch,
+            ).fetchall():
+                grouped.setdefault(file_id, set()).add((tag, node_id, counter))
+        return grouped
