@@ -7,8 +7,9 @@ brief.
 
 ## Status
 
-Phase 4 (gossip, partitions and reconciliation) — the cluster now survives nodes
-going away and coming back.
+Phase 5 (deletion and garbage collection) — deleted files and orphaned content
+are now reclaimed, without letting a node returning from a partition undo a
+delete.
 
 Content is stored on R=3 of N=5 nodes chosen by rendezvous hashing, acknowledged
 after W=2 replicas confirm. Metadata is replicated in full to every node, so any
@@ -40,10 +41,28 @@ for but does not hold, so content catches up along with metadata.
 The practical effect: a write made while a node is unreachable reaches it once
 the partition heals, rather than being lost forever.
 
-Still missing: tombstones are never purged and orphaned blobs are never
-reclaimed, which is Phase 5. There is no `/cluster/status` endpoint yet — the
-membership view is in-process only — and no structured logging or CLI, which
-are Phase 6.
+Deletion is two-staged. A `DELETE` tombstones the record, which gossip spreads
+like any other update; once the tombstone is older than the **grace TTL**
+(counted from when the delete was issued) each node purges the record. A blob
+whose last referring record is purged — or repointed elsewhere by a `PATCH` —
+becomes a GC candidate, and is deleted from disk only after it has stayed
+unreferenced for another grace TTL. A deleted file's content therefore outlives
+the delete by roughly two TTLs, on purpose. A node never re-adopts a tombstone
+that is already past the TTL, so a purge sticks instead of being handed back by
+a peer that has not collected yet. GC runs on the gossip loop with a per-round
+budget.
+
+> **Warning:** the grace TTL is a safety margin, not a tidiness knob. A purged
+> tombstone is indistinguishable from a file a node has never seen, so if a node
+> was partitioned for longer than the TTL it still holds the file live and, once
+> the partition heals, teaches it back to everyone — the delete is silently
+> undone. Keep `ALMACEN_GRACE_TTL_SECONDS` above the longest partition the
+> deployment must survive; the 24h default exists for that reason.
+
+Still missing: OR-Set remove entries for tags are never pruned (safe pruning
+needs every node to have observed the removal, which this design does not
+track). There is no `/cluster/status` endpoint yet — the membership view is
+in-process only — and no structured logging or CLI, which are Phase 6.
 
 ### Upgrading from Phase 2
 
@@ -71,7 +90,7 @@ Each node reads its configuration from the environment:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ALMACEN_DATA_DIR` | `./data` | Holds `blobs/` and `metadata.db` |
+| `ALMACEN_DATA_DIR` | `./data` | Holds `blobs/`, `metadata.db` and `gc_state.db` |
 | `ALMACEN_NODE_ID` | `node1` | This node's identity; must appear in `ALMACEN_PEERS` |
 | `ALMACEN_GRPC_PORT` | `50051` | Port for the internal node-to-node plane |
 | `ALMACEN_PEERS` | *(empty)* | `node_id@host:port,...` for every node **including this one**; empty means single-node |
@@ -82,6 +101,8 @@ Each node reads its configuration from the environment:
 | `ALMACEN_SUSPICION_TIMEOUT_SECONDS` | `15.0` | How long a peer stays *suspect* before being declared dead |
 | `ALMACEN_GOSSIP_FANOUT` | `2` | Peers contacted per round |
 | `ALMACEN_BLOB_CATCHUP_BUDGET` | `8` | Most blobs fetched in one round, so a long catch-up cannot monopolise the loop |
+| `ALMACEN_GRACE_TTL_SECONDS` | `86400` | How long a tombstone is kept before its record is purged, and how long an unreferenced blob is kept before it is deleted. **Must exceed the longest expected partition**, or deleted files can come back |
+| `ALMACEN_GC_BUDGET` | `32` | Most purges plus blob deletions in one round. GC runs on the gossip loop, so it is disabled along with gossip |
 
 With `ALMACEN_PEERS` unset the node is a one-node cluster: the replica set for
 any blob is that single node, and the acknowledgements required shrink to match
@@ -103,6 +124,7 @@ short:
         -p 800$i:8000 -v almacen-node$i-data:/data \
         -e ALMACEN_NODE_ID=node$i -e ALMACEN_PEERS="$PEERS" \
         -e ALMACEN_GOSSIP_INTERVAL_SECONDS=2 -e ALMACEN_SUSPICION_TIMEOUT_SECONDS=6 \
+        -e ALMACEN_GRACE_TTL_SECONDS=20 \
         almacen:latest
     done
 
@@ -116,9 +138,10 @@ Nodes have no startup ordering, so an upload issued in the first seconds after
 starting them may return 503 while peers are still binding their gRPC ports.
 Give the cluster a moment before the first request.
 
-The commands above shorten the gossip interval to 2s and the suspicion timeout
-to 6s, so reconciliation is observable within a demo session rather than on the
-production schedule.
+The commands above shorten the gossip interval to 2s, the suspicion timeout to
+6s and the grace TTL to 20s, so reconciliation and garbage collection are
+observable within a demo session rather than on the production schedule. The
+20s TTL is a **demo value only** — see the warning under Status.
 
 ### Demonstrating a partition
 
@@ -145,6 +168,27 @@ node2 answers `200` throughout. node5 answers `000` while partitioned — not
 entirely, so its published port stops answering too, and curl cannot connect at
 all. After healing it answers `200`, having learned both the record and the
 content through gossip.
+
+### Demonstrating deletion and garbage collection
+
+With the cluster running (and its 20s grace TTL):
+
+    echo "doomed $(date +%s%N)" > /tmp/doomed.txt
+    FILE_ID=$(curl -s -F "file=@/tmp/doomed.txt" -F "name=doomed.txt" \
+      http://127.0.0.1:8001/files \
+      | python3 -c "import sys,json; print(json.load(sys.stdin)['file_id'])")
+    HASH=$(sha256sum /tmp/doomed.txt | cut -d' ' -f1)
+    blobs() { for i in 1 2 3 4 5; do printf "node$i:%s " \
+      "$(docker exec node$i ls /data/blobs | grep -c $HASH)"; done; echo; }
+
+    curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://127.0.0.1:8001/files/$FILE_ID
+    blobs              # still on its 3 replicas: only the record is tombstoned
+    sleep 25; blobs    # record purged everywhere; blobs are now GC candidates
+    sleep 25; blobs    # blobs deleted: 0 on every node
+
+The step-by-step in
+[docs/deployment.md](docs/deployment.md#7-watch-a-delete-being-garbage-collected)
+also shows the record itself disappearing from every node's metadata.
 
 Tear down with:
 
@@ -195,9 +239,10 @@ Notes:
       main.py            # FastAPI app factory; lifespan runs the gRPC server
       domain/            # FileRecord entity, no I/O
       crdt/              # OrSet, LWWRegister, VectorClock — pure, no I/O
-      storage/           # BlobStore (filesystem), MetadataStore (SQLite), TagIndex
+      storage/           # BlobStore (filesystem), MetadataStore (SQLite), TagIndex,
+                         # BlobGCState (when each orphaned blob lost its last referrer)
       rpc/               # node-to-node gRPC: protos, generated stubs, servicers
-      cluster/           # placement (HRW), replication, membership, gossip, anti-entropy
+      cluster/           # placement (HRW), replication, membership, gossip, anti-entropy, GC
       api/               # schemas, dependency providers, routers
     docker/              # Dockerfile (one image: every node is the same kind)
     scripts/             # gen_protos.sh

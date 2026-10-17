@@ -328,11 +328,11 @@ that 24h is the default for a reason.
 - [x] **Step 2: Verify by hand** — upload, delete, confirm the blob is still on
 disk, wait past two TTLs, confirm the record and then the blob are gone.
 
-- [ ] **Step 3: README** — Phase 5 status, the new variables, the demo, and an
+- [x] **Step 3: README** — Phase 5 status, the new variables, the demo, and an
 explicit warning that lowering the TTL below the worst expected partition can
 resurrect deleted files.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ---
 
