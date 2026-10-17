@@ -88,6 +88,13 @@ Nodes answer on ports 8001-8005. Any node accepts any request:
     curl -F "file=@README.md" -F "name=README.md" -F "tags=demo" http://127.0.0.1:8001/files
     curl "http://127.0.0.1:8005/files?tags=demo"
 
+Or with the command-line client, installed on the host by `pip install -e .`.
+`--node` takes a comma-separated list and moves to the next node when one cannot
+be reached, which keeps the client working while a node is partitioned:
+
+    almacen-cli --node http://127.0.0.1:8001,http://127.0.0.1:8002 upload README.md --tag demo
+    almacen-cli --node http://127.0.0.1:8005 list --tag demo
+
 Inspect a node with `docker logs node3`, or open its API docs at
 http://127.0.0.1:8003/docs.
 
