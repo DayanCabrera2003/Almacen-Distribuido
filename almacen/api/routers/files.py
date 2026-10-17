@@ -1,5 +1,5 @@
 # almacen/api/routers/files.py
-"""REST endpoints for file upload, download, listing, update, and delete."""
+"""REST endpoints for file upload, download, metadata, listing, update, and delete."""
 from __future__ import annotations
 
 import uuid
@@ -94,6 +94,19 @@ def download_file(
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{record.name}"'},
     )
+
+
+@router.get("/{file_id}/metadata", response_model=FileMetadata)
+def get_file_metadata(
+    file_id: uuid.UUID,
+    metadata_store: MetadataStoreLike = Depends(get_metadata_store),
+) -> FileMetadata:
+    """One file's metadata, in the same shape as a `GET /files` item.
+
+    Needs no replica of the content, so it answers even when the bytes are
+    temporarily unreachable and `GET /files/{file_id}` would return 503.
+    """
+    return to_file_metadata(get_live_record(metadata_store, file_id))
 
 
 @router.patch("/{file_id}", response_model=FileMetadata)
