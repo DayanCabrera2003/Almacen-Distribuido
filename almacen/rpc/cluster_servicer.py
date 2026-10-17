@@ -2,10 +2,10 @@
 """Receives metadata replicated from peer nodes."""
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta, timezone
 
 import grpc
+import structlog
 
 from almacen.cluster.gc import is_expired_tombstone
 from almacen.cluster.membership import Membership
@@ -19,8 +19,6 @@ from almacen.rpc.gossip_codec import (
 )
 from almacen.rpc.record_codec import message_to_record, record_to_message
 from almacen.storage.metadata_store import MetadataStore
-
-logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -47,6 +45,7 @@ class ClusterServicer(pb_grpc.ClusterServicer):
         # hands the record straight back to one that has, and it bounces round
         # the cluster indefinitely. None (tests of other concerns) adopts all.
         self._grace_ttl = grace_ttl
+        self._log = structlog.get_logger(__name__, node_id=node_id)
 
     def ReplicateRecord(
         self, request: pb.FileRecordMsg, context: grpc.ServicerContext
@@ -70,19 +69,19 @@ class ClusterServicer(pb_grpc.ClusterServicer):
             # never silently. Logging both clocks is what makes the resolution
             # auditable — LWW discards one of two concurrent writes, and that
             # loss should be visible rather than inferred.
-            logger.warning(
-                "concurrent update to %s from %s: local clock %s, incoming %s "
-                "- resolving by last-writer-wins",
-                record.file_id,
-                context.peer() if context is not None else "unknown",
-                local.vector_clock.counters,
-                record.vector_clock.counters,
+            self._log.warning(
+                "concurrent_update_resolved",
+                file_id=str(record.file_id),
+                sender=context.peer() if context is not None else "unknown",
+                local_clock=dict(local.vector_clock.counters),
+                incoming_clock=dict(record.vector_clock.counters),
+                resolution="last_writer_wins",
             )
 
         # Merge, never overwrite. An incoming record is one replica's view, not
         # the truth: the local copy may hold edits the sender never saw.
         self._metadata_store.merge_remote(record, refuse_unknown=self._refuse_unknown)
-        logger.debug("merged replicated record %s", record.file_id)
+        self._log.debug("record_merged", file_id=str(record.file_id))
         return pb.ReplicateAck(applied=True)
 
     def _refuse_unknown(self, record) -> bool:
@@ -114,10 +113,10 @@ class ClusterServicer(pb_grpc.ClusterServicer):
             except ValueError as error:
                 # A malformed membership entry must not cost us the data half of
                 # the exchange, which is the part that actually reconciles.
-                logger.warning(
-                    "ignoring malformed membership from %s: %s",
-                    request.from_node_id or "unknown",
-                    error,
+                self._log.warning(
+                    "malformed_membership_ignored",
+                    sender=request.from_node_id or "unknown",
+                    error=str(error),
                 )
             membership = encode_membership(self._membership.snapshot(now))
 

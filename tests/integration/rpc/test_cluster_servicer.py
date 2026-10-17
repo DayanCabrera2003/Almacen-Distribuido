@@ -2,6 +2,7 @@ from pathlib import Path
 
 import grpc
 import pytest
+from structlog.testing import capture_logs
 
 from almacen.domain.file_record import FileRecord
 from almacen.rpc import cluster_pb2 as pb
@@ -72,9 +73,7 @@ def test_ping_identifies_the_responding_node(stub):
     assert response.node_id == "node2"
 
 
-def test_a_genuine_conflict_is_logged_with_both_vector_clocks(
-    stub, metadata_store, caplog
-):
+def test_a_genuine_conflict_is_logged_with_both_vector_clocks(stub, metadata_store):
     """Spec §9 requires conflicts be surfaced, not silently resolved.
 
     Last-writer-wins discards one of two concurrent writes. The vector clock is
@@ -82,8 +81,6 @@ def test_a_genuine_conflict_is_logged_with_both_vector_clocks(
     warning is the only place that distinction becomes visible — so it needs a
     test, or the clock could be dropped on the wire with nothing noticing.
     """
-    import logging
-
     base = FileRecord.new(name="a.txt", content_hash="h", node_id="node1")
     metadata_store.insert(base)
 
@@ -93,35 +90,33 @@ def test_a_genuine_conflict_is_logged_with_both_vector_clocks(
     from_peer = base.copy()
     from_peer.rename("remote", "node2")
 
-    with caplog.at_level(logging.WARNING, logger="almacen.rpc.cluster_servicer"):
+    with capture_logs() as logs:
         stub.ReplicateRecord(record_to_message(from_peer))
 
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings, "a concurrent update must be logged"
-    message = warnings[0].getMessage()
-    assert "concurrent update" in message
-    assert str(base.file_id) in message
-    assert "node1" in message and "node2" in message, (
-        "both vector clocks belong in the log line, or the record is unauditable"
-    )
+    conflicts = [e for e in logs if e["event"] == "concurrent_update_resolved"]
+    assert conflicts, "a concurrent update must be logged"
+    [conflict] = conflicts
+    assert conflict["log_level"] == "warning"
+    assert conflict["node_id"] == "node2"
+    assert conflict["file_id"] == str(base.file_id)
+    # Both vector clocks belong in the event, or the record is unauditable.
+    assert conflict["local_clock"] == local.vector_clock.counters
+    assert conflict["incoming_clock"] == from_peer.vector_clock.counters
+    assert conflict["resolution"] == "last_writer_wins"
 
 
-def test_a_causally_newer_update_is_not_logged_as_a_conflict(
-    stub, metadata_store, caplog
-):
+def test_a_causally_newer_update_is_not_logged_as_a_conflict(stub, metadata_store):
     # False positives would make the conflict log useless. An update that
     # descends from the local copy is routine, not a conflict.
-    import logging
-
     base = FileRecord.new(name="a.txt", content_hash="h", node_id="node1")
     metadata_store.insert(base)
 
     newer = base.copy()
     newer.rename("newer", "node1")
 
-    with caplog.at_level(logging.WARNING, logger="almacen.rpc.cluster_servicer"):
+    with capture_logs() as logs:
         stub.ReplicateRecord(record_to_message(newer))
 
     assert not [
-        r for r in caplog.records if "concurrent update" in r.getMessage()
+        e for e in logs if e["event"] == "concurrent_update_resolved"
     ], "a causally newer update is not a conflict"
