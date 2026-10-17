@@ -5,7 +5,7 @@ import httpx
 import typer
 
 from almacen.cli.client import DEFAULT_NODE_URL, NodeClient, parse_node_urls
-from almacen.cli.commands import files, tags
+from almacen.cli.commands import cluster, files, tags
 from almacen.cli.context import CliState
 
 app = typer.Typer(
@@ -47,6 +47,7 @@ def main(
 
 files.register(app)
 tags.register(app)
+cluster.register(app)
 
 
 def run() -> None:
