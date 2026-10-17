@@ -177,7 +177,7 @@ keeps it independent of the metadata schema.
 Both decisions take the data and the time and return what to remove. No I/O, so
 every rule below is testable in microseconds and none of these tests sleep.
 
-- [ ] **Step 1: Write the failing tests.** Cover at minimum:
+- [x] **Step 1: Write the failing tests.** Cover at minimum:
 
 - A live record is never purged, however old.
 - A tombstoned record younger than the TTL is not purged.
@@ -192,7 +192,7 @@ every rule below is testable in microseconds and none of these tests sleep.
 - A blob held locally that no record ever referenced is still a candidate — it
   is orphaned by definition.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 ```python
 def records_to_purge(
@@ -219,7 +219,7 @@ and the blob half, which takes the local hashes, the reference counts and the
 candidate timestamps, and returns `(newly_unreferenced, newly_referenced_again,
 deletable)` so the collector can update state and delete in one pass.
 
-- [ ] **Step 3: Run tests, commit**
+- [x] **Step 3: Run tests, commit**
 
 ---
 
