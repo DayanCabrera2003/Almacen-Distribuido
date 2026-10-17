@@ -7,6 +7,7 @@ from typing import Optional
 
 import typer
 
+from almacen.cli.commands import split_tags
 from almacen.cli.context import reporting_errors, state_of
 from almacen.cli.output import render_file, render_files
 
@@ -18,12 +19,6 @@ TagOption = typer.Option(
     "-t",
     help="Tag; repeat the option or separate tags with commas.",
 )
-
-
-def _join_tags(tags: Optional[list[str]]) -> str:
-    """Flatten repeated and comma-separated --tag values into the API's form."""
-    parts = (part.strip() for tag in tags or [] for part in tag.split(","))
-    return ",".join(dict.fromkeys(part for part in parts if part))
 
 
 def upload(
@@ -40,7 +35,7 @@ def upload(
     # another node on failover.
     content = path.read_bytes()
     data = {"name": name or path.name}
-    if joined := _join_tags(tags):
+    if joined := ",".join(split_tags(tags)):
         data["tags"] = joined
     with reporting_errors():
         response = state.client.request(
@@ -59,7 +54,7 @@ def list_files(
     """List live files, optionally only those carrying the given tags."""
     state = state_of(ctx)
     params = {}
-    if joined := _join_tags(tags):
+    if joined := ",".join(split_tags(tags)):
         params = {"tags": joined, "mode": "or" if any_tag else "and"}
     with reporting_errors():
         response = state.client.request("GET", "/files", params=params)
