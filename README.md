@@ -329,6 +329,7 @@ failure. The same seed always produces the same schedule.
 | `POST`   | `/files`                      | Upload a file (multipart: `file`, optional `name`, `tags` as a comma-separated list). Returns metadata, `201`. |
 | `GET`    | `/files`                      | List live files. Optional `tags` (comma-separated) and `mode` (`and` \| `or`, default `and`). |
 | `GET`    | `/files/{file_id}`            | Download the file's content.                             |
+| `GET`    | `/files/{file_id}/metadata`   | The file's metadata, in the same shape as a `GET /files` item. |
 | `PATCH`  | `/files/{file_id}`            | Rename (`name`) and/or replace content (`file`). Both optional. |
 | `DELETE` | `/files/{file_id}`            | Delete the file (tombstone), `204`.                      |
 | `GET`    | `/files/{file_id}/tags`       | List the file's tags.                                    |
@@ -356,6 +357,7 @@ so the cluster can be operated without curl:
 
     almacen-cli upload README.md --tag demo --tag docs   # --name to rename
     almacen-cli list --tag demo --tag docs               # AND; --any for OR
+    almacen-cli info FILE_ID                             # metadata only
     almacen-cli download FILE_ID                         # or: get FILE_ID -o out.md / -o -
     almacen-cli update FILE_ID --name new.md --file v2.md
     almacen-cli tag list FILE_ID

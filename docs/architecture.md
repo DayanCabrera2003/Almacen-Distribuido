@@ -327,6 +327,10 @@ is the record's `content_hash` repointed.
   treated as a miss and the next replica is tried. If no replica can serve it
   the client gets `503`: the file exists, its bytes are temporarily
   unreachable.
+- **Metadata of one file** (`GET /files/{id}/metadata`) is the same local
+  record lookup without the blob fetch: it returns what a listing item shows
+  (404 if unknown or tombstoned), and answers even while the content is
+  unreachable.
 
 ### Why W=2 and reading one replica is enough
 
@@ -921,7 +925,7 @@ The complete table of events, their levels and fields is in the README's
 
 `almacen-cli` (`almacen/cli/`, a Typer application installed as a console
 script by `pip install -e .`) covers every REST endpoint — `upload`, `list`,
-`download` (alias `get`), `update`, `delete`, `tag list|add|remove`, `status` —
+`info`, `download` (alias `get`), `update`, `delete`, `tag list|add|remove`, `status` —
 so the cluster can be operated without curl. It is a pure REST client: it has
 no access to gRPC and no knowledge of placement, and relies on the fact that any
 node can serve any request (section 4). Usage is in the README.
