@@ -290,6 +290,7 @@ post-partition reconciliation are all observable within a live demo session.
 ```
 POST   /files                      # upload: multipart content + name + tags[]
 GET    /files/{file_id}            # download content
+GET    /files/{file_id}/metadata   # one file's metadata, no content
 PATCH  /files/{file_id}            # update name and/or content pointer
 DELETE /files/{file_id}            # tombstone
 GET    /files/{file_id}/tags       # list tags for a file

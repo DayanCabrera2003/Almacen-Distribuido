@@ -11,6 +11,7 @@ from almacen.cluster.membership import Membership
 from almacen.cluster.replication_client import ReplicationClient
 from almacen.config import Settings
 from almacen.domain.file_record import FileRecord
+from almacen.domain.tags import InvalidTag, normalize_tag, parse_tag_list
 from almacen.storage.blob_store import BlobStore
 from almacen.storage.metadata_store import MetadataStore
 from almacen.storage.protocols import MetadataStoreLike
@@ -60,6 +61,22 @@ def get_live_record(
     if record is None or record.tombstone:
         raise HTTPException(status_code=404, detail="file not found")
     return record
+
+
+def tag_or_422(raw: str) -> str:
+    """Normalize one tag from a path or form value, or answer 422."""
+    try:
+        return normalize_tag(raw)
+    except InvalidTag as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+
+
+def tag_list_or_422(raw: str | None) -> set[str]:
+    """Parse a comma-separated tag list from a form or query, or answer 422."""
+    try:
+        return parse_tag_list(raw)
+    except InvalidTag as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
 
 
 class _RecordGone(Exception):

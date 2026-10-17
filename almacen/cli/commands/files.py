@@ -1,4 +1,4 @@
-"""File commands: upload, list, download, update, delete (`/files`)."""
+"""File commands: upload, list, info, download, update, delete (`/files`)."""
 from __future__ import annotations
 
 import re
@@ -59,6 +59,14 @@ def list_files(
     with reporting_errors():
         response = state.client.request("GET", "/files", params=params)
     state.emit(response.json(), render_files)
+
+
+def info(ctx: typer.Context, file_id: str = typer.Argument(...)) -> None:
+    """Show a file's metadata without downloading its content."""
+    state = state_of(ctx)
+    with reporting_errors():
+        response = state.client.request("GET", f"/files/{file_id}/metadata")
+    state.emit(response.json(), render_file)
 
 
 def download(
@@ -130,6 +138,7 @@ def delete(ctx: typer.Context, file_id: str = typer.Argument(...)) -> None:
 def register(app: typer.Typer) -> None:
     app.command()(upload)
     app.command("list")(list_files)
+    app.command()(info)
     app.command()(download)
     app.command("get", help="Alias of download.")(download)
     app.command()(update)

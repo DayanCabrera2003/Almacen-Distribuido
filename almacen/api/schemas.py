@@ -5,9 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from almacen.domain.file_record import FileRecord
+from almacen.domain.tags import normalize_tag
 
 
 class FileMetadata(BaseModel):
@@ -25,6 +26,12 @@ class TagsResponse(BaseModel):
 
 class AddTagsRequest(BaseModel):
     tags: list[str]
+
+    @field_validator("tags")
+    @classmethod
+    def _normalize(cls, tags: list[str]) -> list[str]:
+        # InvalidTag is a ValueError, which FastAPI reports as a 422.
+        return [normalize_tag(tag) for tag in tags]
 
 
 class MemberStatus(BaseModel):

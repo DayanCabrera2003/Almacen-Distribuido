@@ -146,3 +146,41 @@ def test_upload_of_a_missing_local_file_is_a_usage_error(cli, tmp_path):
     result = cli("upload", str(tmp_path / "does-not-exist"))
 
     assert result.exit_code == 2
+
+
+def test_info_shows_a_files_metadata(cli, tmp_path):
+    source = tmp_path / "report.txt"
+    source.write_bytes(b"hello")
+    uploaded = _upload(cli, source, "--tag", "invoice,draft")
+
+    result = cli("info", uploaded["file_id"])
+
+    assert result.exit_code == 0, result.output
+    assert uploaded["file_id"] in result.stdout
+    assert "report.txt" in result.stdout
+    assert "draft, invoice" in result.stdout
+    assert uploaded["content_hash"] in result.stdout
+
+
+def test_info_json_is_the_same_object_as_the_upload_response(cli, tmp_path):
+    source = tmp_path / "report.txt"
+    source.write_bytes(b"hello")
+    uploaded = _upload(cli, source, "--tag", "invoice")
+
+    result = cli("--json", "info", uploaded["file_id"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == uploaded
+
+
+def test_info_on_a_deleted_file_reports_not_found(cli, tmp_path):
+    source = tmp_path / "a.txt"
+    source.write_bytes(b"v1")
+    file_id = _upload(cli, source)["file_id"]
+    cli("delete", file_id)
+
+    result = cli("info", file_id)
+
+    assert result.exit_code == 1
+    assert "404" in result.stderr
+    assert "file not found" in result.stderr

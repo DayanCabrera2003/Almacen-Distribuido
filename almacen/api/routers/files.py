@@ -1,5 +1,5 @@
 # almacen/api/routers/files.py
-"""REST endpoints for file upload, download, listing, update, and delete."""
+"""REST endpoints for file upload, download, metadata, listing, update, and delete."""
 from __future__ import annotations
 
 import uuid
@@ -16,6 +16,7 @@ from almacen.api.deps import (
     get_replication_client,
     get_tag_index,
     mutate_live_record,
+    tag_list_or_422,
 )
 from almacen.api.schemas import FileMetadata, to_file_metadata
 from almacen.cluster.replication_client import QuorumNotReached, ReplicationClient
@@ -24,12 +25,6 @@ from almacen.storage.protocols import MetadataStoreLike
 from almacen.storage.tag_index import TagIndex
 
 router = APIRouter(prefix="/files", tags=["files"])
-
-
-def _parse_tags(tags: str | None) -> set[str]:
-    if not tags:
-        return set()
-    return {tag.strip() for tag in tags.split(",") if tag.strip()}
 
 
 @router.post("", response_model=FileMetadata, status_code=201)
@@ -41,6 +36,8 @@ async def upload_file(
     metadata_store: MetadataStoreLike = Depends(get_metadata_store),
     node_id: str = Depends(get_node_id),
 ) -> FileMetadata:
+    # Validate before replicating: a rejected upload must not leave a blob behind.
+    tag_set = tag_list_or_422(tags)
     content = await file.read()
     # These handlers must stay `async def` to await UploadFile.read(), but
     # put_blob and the metadata push are synchronous and can each take up to the
@@ -56,7 +53,7 @@ async def upload_file(
         name=name or file.filename or "untitled",
         content_hash=content_hash,
         node_id=node_id,
-        tags=_parse_tags(tags),
+        tags=tag_set,
     )
     await run_in_threadpool(metadata_store.insert, record)
     return to_file_metadata(record)
@@ -68,7 +65,7 @@ def list_files(
     mode: str = "and",
     tag_index: TagIndex = Depends(get_tag_index),
 ) -> list[FileMetadata]:
-    tag_list = list(_parse_tags(tags)) if tags else None
+    tag_list = list(tag_list_or_422(tags)) or None
     # mode only applies when tags are given, so a tags-less request with a bogus
     # `mode` still succeeds instead of failing on an argument it never uses.
     if tag_list and mode not in ("and", "or"):
@@ -97,6 +94,19 @@ def download_file(
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{record.name}"'},
     )
+
+
+@router.get("/{file_id}/metadata", response_model=FileMetadata)
+def get_file_metadata(
+    file_id: uuid.UUID,
+    metadata_store: MetadataStoreLike = Depends(get_metadata_store),
+) -> FileMetadata:
+    """One file's metadata, in the same shape as a `GET /files` item.
+
+    Needs no replica of the content, so it answers even when the bytes are
+    temporarily unreachable and `GET /files/{file_id}` would return 503.
+    """
+    return to_file_metadata(get_live_record(metadata_store, file_id))
 
 
 @router.patch("/{file_id}", response_model=FileMetadata)
