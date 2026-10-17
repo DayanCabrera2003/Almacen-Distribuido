@@ -165,6 +165,20 @@ class MetadataStore:
             ).fetchall()
             return [self._row_to_record(row) for row in rows]
 
+    def record_counts(self) -> tuple[int, int]:
+        """`(live, tombstoned)` record counts, without decoding any record.
+
+        For status reporting, which only needs the numbers: `list_all` would
+        rebuild every record's CRDT state to count them.
+        """
+        with self._lock:
+            counts = dict(
+                self._conn.execute(
+                    "SELECT tombstone, COUNT(*) FROM files GROUP BY tombstone"
+                ).fetchall()
+            )
+            return counts.get(0, 0), counts.get(1, 0)
+
     def list_all(self) -> list[FileRecord]:
         """Every record, tombstoned or not.
 
