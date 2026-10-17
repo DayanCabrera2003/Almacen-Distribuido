@@ -341,7 +341,8 @@ complete:
 - **SWIM** (Das, Gupta and Motivala, DSN 2002) — suspicion before declaring a
   node dead, refutation by incarnation number, and dissemination by gossip.
   Simplified here: no indirect probing through other members, and the gossip
-  exchange itself serves as the probe.
+  exchange itself serves as the probe; a periodic `Ping` to one dead member
+  per round is what lets a long partition heal.
 - **CRDTs** (Shapiro, Preguiça, Baquero and Zawirski, 2011) — LWW-registers and
   the observed-remove set; state-based merge that is commutative, associative
   and idempotent.

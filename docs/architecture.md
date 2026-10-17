@@ -607,8 +607,14 @@ incarnation, dissemination by gossip) without SWIM's indirect probes.
 - **Probing is the gossip exchange itself.** There is no separate heartbeat: a
   gossip RPC that fails marks the peer suspect; one that succeeds marks it
   alive. The responder also marks the caller alive, so detection is
-  bidirectional at no extra cost. (A `Ping` RPC exists but the loop does not use
-  it.)
+  bidirectional at no extra cost.
+- **Dead peers are still probed.** Gossip skips dead peers, so after a
+  partition longer than the suspicion timeout each side would hold the other
+  dead forever and never reach across. Each tick therefore sends one cheap
+  `Ping` (1 s timeout) to a random dead peer; an answer revives it, and the
+  pinged node revives the prober in turn, so one probe reopens both directions.
+  Measured: a node isolated for 40 s held every record written meanwhile 3 s
+  after reconnection.
 - **Suspicion, not death.** One failed exchange is as likely a dropped packet as
   a dead node. A peer becomes dead only after staying suspect for
   `ALMACEN_SUSPICION_TIMEOUT_SECONDS`, and only the first failure starts that
