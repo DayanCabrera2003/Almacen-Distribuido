@@ -203,3 +203,27 @@ def test_merge_remote_never_refuses_a_record_it_already_holds(store: MetadataSto
 
     assert merged is not None and merged.tombstone is True
     assert store.get(record.file_id).tombstone is True
+
+
+def test_commits_are_flushed_to_disk_whatever_the_sqlite_build_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A metadata write is acknowledged after the local commit, so the commit
+    # must survive a power loss. SQLite's default `synchronous` level is a
+    # compile-time option, and some builds default to NORMAL in WAL mode, which
+    # can roll back the last commits on power loss; the store must not rely on
+    # the build. Simulate the weakest default and check the store overrides it.
+    real_connect = sqlite3.connect
+
+    def weakly_configured_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        conn.execute("PRAGMA synchronous = OFF")
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", weakly_configured_connect)
+
+    store = MetadataStore(tmp_path / "metadata.db")
+
+    full = 2
+    assert store._conn.execute("PRAGMA synchronous").fetchone()[0] == full
+    assert store._conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"

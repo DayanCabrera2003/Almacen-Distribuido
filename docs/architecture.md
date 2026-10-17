@@ -27,7 +27,8 @@ files matching a combination of tags. The cluster must keep working when nodes
 fail or the network partitions, must handle concurrent updates to the same file
 on different nodes, and must reconcile divergent replicas once the partition
 heals. Content and metadata are replicated differently, so their freshness can
-diverge, and the design has to state what a client can observe when it does.
+diverge, and the design has to state what a client can observe when it does
+(section 13).
 
 ## 2. Design at a glance
 
@@ -37,16 +38,18 @@ diverge, and the design has to state what a client can observe when it does.
 | Node roles | One node type; every node is both a data node and a metadata node | 4 |
 | Identity | Stable UUID per file, separate from the SHA-256 of its content | 5 |
 | Content placement | Rendezvous hashing (HRW) of the content hash, R=3 of N=5 | 6 |
-| Content durability | Write quorum W=2 of R=3; read from any one replica, verified by hash | 7 |
+| Content durability | Write quorum W=2 of R=3, each replica flushed to disk; read from any one replica, verified by hash | 7, 13 |
 | Metadata placement | Full replica on every node | 4, 7 |
+| Metadata durability | Local commit flushed to disk, then best-effort push; no quorum | 7, 13 |
+| Content vs metadata freshness | Content-first write order; every divergence case and what a client sees | 13 |
 | Concurrent updates | CRDTs: LWW-registers, OR-Set of tags, vector clock per record | 8 |
 | Failure detection | SWIM-style suspicion with incarnation-based refutation | 10 |
 | Repair | Push-pull gossip of `file_id → vector clock` digests, plus blob catch-up | 11 |
 | Deletion | Tombstones, grace TTL, reference-counted blob GC | 9 |
 | Interfaces | REST (FastAPI) for clients, gRPC between nodes | 4 |
-| Deployment | One Docker image, one `docker run` per node, no orchestration file | 13 |
-| Observability | `GET /cluster/status` per node; structured (JSON) log events | 14 |
-| Client | `almacen-cli` over the REST API, failing over between nodes | 15 |
+| Deployment | One Docker image, one `docker run` per node, no orchestration file | 14 |
+| Observability | `GET /cluster/status` per node; structured (JSON) log events | 15 |
+| Client | `almacen-cli` over the REST API, failing over between nodes | 16 |
 
 ## 3. Consistency model: why AP
 
@@ -669,7 +672,7 @@ to `ALMACEN_GOSSIP_FANOUT` random peers that are not dead. It does **not**
 change placement (section 6) or the replica set of a write: membership is
 static (`ALMACEN_PEERS`), and the failure detector exists to avoid wasting
 rounds on dead peers and to make the cluster's view of itself observable
-(`GET /cluster/status`, section 14).
+(`GET /cluster/status`, section 15).
 
 Like any failure detector in an asynchronous system it can be wrong — a slow
 node is indistinguishable from a dead one — and it is designed to be wrong only
@@ -768,7 +771,10 @@ digests, which make the steady state O(log n), are deferred (spec §11, §17).
   every node eventually.
 - **No acknowledged content below quorum.** An upload or content `PATCH` that
   returned success was stored by at least `min(W, R)` replicas, verified by
-  hash on receipt.
+  hash on receipt and flushed to disk by each, so it survives a power loss of
+  the whole cluster and the loss of any one replica's disk (section 13).
+- **Acknowledged metadata survives a crash or power loss** of the node that
+  accepted it: the local commit is flushed to disk before the reply.
 - **No metadata pointing at unwritten content.** A record is created or
   repointed only after its blob reached quorum.
 - **Integrity.** Every blob served to a client hashes to its address; corrupt
@@ -813,10 +819,13 @@ orphan. The README's Test section explains how to run it and reproduce a seed.
 - **Uploads during heavy failure.** No sloppy quorum and no hinted handoff: if
   two of a blob's three HRW replicas are unreachable, that upload fails with
   `503` even though other nodes are up. (Metadata operations are unaffected.)
-- **Durability of a metadata write at acknowledgement.** A metadata write is
-  acknowledged after the local commit; the push to peers is best effort. If the
-  node's disk is lost before any peer received the record, the write is lost.
-  If the node merely crashes and restarts with its volume, gossip delivers it.
+- **Durability of a metadata write against disk loss at acknowledgement.** A
+  metadata write is acknowledged after the local commit, flushed to disk; the
+  push to peers is best effort. If the node's disk is lost before any peer
+  received the record, the write is lost. A crash or power loss, after which
+  the node restarts with its volume, loses nothing: gossip delivers the record
+  then. Section 13 states exactly when this window is open and why no metadata
+  quorum closes it.
 - **Re-replication after permanent node loss.** Placement uses the static peer
   list, so a node that never comes back leaves its blobs one replica short;
   nothing copies them elsewhere. Membership changes (adding or removing nodes)
@@ -834,7 +843,94 @@ orphan. The README's Test section explains how to run it and reproduce a seed.
 - **Prompt disk reclamation.** A deleted file's content stays on disk for about
   two grace TTLs, by design (section 9).
 
-## 13. Deployment model
+## 13. Consistency and durability: content vs metadata
+
+Content and metadata are replicated by two different mechanisms — a W-of-R
+quorum on a hash-chosen replica set for the bytes, a local commit plus a best
+effort push to every node for the record — so each has its own consistency and
+durability, and their freshness on a given node can diverge. This section
+states both precisely and lists every way the two can disagree, with what a
+client sees in each case and the test that pins it down.
+
+### What a successful response means
+
+| | Consistency | Durability |
+| --- | --- | --- |
+| **Content** (blobs) | **Immutable and content-addressed**, so there are no versions to be stale: a node either holds exactly the right bytes or nothing. Every blob served is verified against its hash, so a client never receives wrong bytes, only — at worst — a `503` when no replica can serve it. | A `201`/`200` for an upload or content `PATCH` means at least `min(W, R)` = 2 of the blob's 3 HRW replicas each wrote it to a temporary file, flushed it (`fsync`), renamed it into place and flushed the directory (`BlobStore.put`). It therefore survives a **process crash** or a **node crash** of any node, a **power loss** of the whole cluster (to the extent the disks honour `fsync`), and the **loss of any one replica's disk**. It is lost only if both acknowledging replicas lose their disks before the third replica has fetched it (catch-up, section 11), or if two replicas are lost permanently (no re-replication, section 12). |
+| **Metadata** (records) | **Eventual, convergent** (strong eventual consistency, section 8): reads are answered from the local replica and may be stale relative to another node; same-node read-your-writes holds; concurrent updates merge deterministically (OR-Set tags, LWW name and content pointer, delete wins). | A `2xx` for any write means the record was committed to the local SQLite store in WAL mode with `synchronous = FULL` — the WAL is flushed on every commit — and that a push to every peer was **attempted and finished** (each bounded by the RPC timeout) before the reply. It survives a **process crash**, **node crash** or **power loss** of the accepting node: the record is still on its disk at restart and gossip delivers it. It survives the **loss of the accepting node's disk** if at least one peer had received it (by the push or by a gossip round) before the disk died. Otherwise it is lost. |
+
+Two remarks on the metadata row.
+
+**When the loss window is actually open.** Because the push is synchronous, the
+acknowledged record is already on every peer that was reachable at the time.
+The window is therefore open only for writes made while the node was cut off
+from *every* peer, and closes at the node's first successful gossip round after
+it reconnects. For uploads and content `PATCH` it is narrower still: the content
+quorum required `W - 1 ≥ 1` other node to be reachable an instant before the
+record push. If the window does close badly for an upload, the client was told
+`201` for a file that disappears: its blob, unreferenced on its replicas, is
+collected one grace TTL later as an orphan (section 9) — the content-first order
+ensures nothing dangles, but the acknowledged file is gone.
+
+**Why no metadata quorum.** A write quorum on metadata would close that window
+only by refusing writes on the minority side of a partition, which is exactly
+what the AP model (section 3) exists to avoid: the assignment requires
+reconciliation after partitions, which presupposes that both sides accepted
+writes. Nor is a quorum needed for consistency: CRDT merges make any replica's
+copy mergeable with any other's, so there is nothing for a quorum to agree on.
+What a quorum would buy is durability against the loss of an isolated node's
+disk, a narrow event, at the price of availability on every metadata write. The
+content side is different: losing an acknowledged blob would leave every node's
+record pointing at bytes that no longer exist anywhere — a permanent `503` — so
+the quorum is paid there.
+
+### The write order invariant
+
+Every content write follows the same order (section 7): **blob to quorum first,
+then the record**. A record is created or repointed only after its blob was
+acknowledged by `min(W, R)` replicas, and an upload that misses the quorum
+writes no record at all. So **no record, on any node, ever points at content
+that did not reach quorum**. Whatever divergence a node observes, it is always
+one of the benign cases below: metadata may lag content (an orphan, collected
+later) or point at content this node does not hold (fetched from a replica), but
+never at content that was never durably stored.
+
+### Freshness divergence: every case
+
+"Stale" below means the node has not yet received an update made elsewhere,
+because the push did not reach it and no gossip round has delivered it yet.
+Every case ends the same way: the next gossip round that reaches the node
+brings its metadata up to date, and blob catch-up restores its replica copies.
+
+| Case | What a client sees on the lagging node | Proven by |
+| --- | --- | --- |
+| **Metadata ahead of content locally**: the node has the record but not the blob (it is not a replica, or it is a replica that missed `PutBlob`). | `200` with the right bytes, fetched from a replica in HRW order and verified. A replica that missed the blob fetches it on its next tick. | `tests/integration/cluster/test_replication_client.py::test_get_blob_fetches_from_a_replica_when_absent_locally`, `tests/cluster/test_five_node_cluster.py::test_a_file_uploaded_to_one_node_downloads_from_every_other`, `tests/integration/cluster/test_blob_catchup.py::test_a_replica_missing_its_blob_fetches_it`, `tests/integration/cluster/test_partition_healing.py::test_a_node_that_missed_an_upload_gains_the_record_and_its_blob` |
+| … and no replica can serve the blob (all unreachable or all lack it). | `503`: the file exists, its bytes are unreachable. Never `404`, never wrong bytes. | `tests/integration/api/test_cluster_error_paths.py::test_download_returns_503_when_no_replica_holds_the_blob` |
+| **Content ahead of metadata**: the blob reached this node, its record has not (an upload between its blob writes and its record push, or a push that missed this node). | `404` for the file and absent from listings, until the record arrives; then `200`. The blob's GC clock starts, but the grace TTL leaves time for the record to arrive, after which the blob is referenced and kept. | `tests/integration/cluster/test_freshness_divergence.py::test_content_whose_record_has_not_arrived_is_invisible_and_not_collected_early` |
+| … and the record never arrives (upload missed its quorum, or the accepting node's disk died before propagating it). | `404` forever, everywhere; the orphan blob is deleted one grace TTL after it was first seen unreferenced. | `tests/integration/api/test_cluster_error_paths.py::test_no_metadata_is_recorded_when_the_write_quorum_fails`, `tests/integration/cluster/test_gc.py::test_a_stray_blob_with_no_record_is_collected_after_one_ttl` |
+| **Stale metadata after a remote content `PATCH`, within the grace TTL**: the node's record still points at the old hash. | `200` with the **old** content (and old name/tags): a coherent earlier version, served from the old blob, which is unreferenced on up-to-date nodes but kept for one grace TTL. | `tests/integration/cluster/test_freshness_divergence.py::test_a_node_that_missed_a_remote_patch_serves_the_old_content`, `::test_within_the_grace_ttl_the_old_content_stays_readable` |
+| **Stale metadata after a remote content `PATCH`, beyond the grace TTL**, on a node that is not a replica of the old blob. | `503`: up-to-date replicas have collected the old blob. After the next gossip round, `200` with the new content. | `tests/integration/cluster/test_freshness_divergence.py::test_beyond_the_grace_ttl_a_stale_node_answers_503_until_gossip_reaches_it` |
+| … on a node that is a replica of the old blob. | `200` with the old content indefinitely: reference counts are local, and the node's own stale record keeps its copy alive until the new record arrives. | `tests/integration/cluster/test_freshness_divergence.py::test_a_stale_node_that_is_a_replica_keeps_the_old_blob_it_still_references` |
+| **Tombstone not yet propagated**: the file was deleted elsewhere. | `200` with the content, and the file is listed; edits there are accepted and later lose to the delete. After the tombstone arrives, `404` on every endpoint. | `tests/integration/cluster/test_freshness_divergence.py::test_a_node_the_tombstone_has_not_reached_still_serves_the_file`, `tests/integration/cluster/test_convergence.py::test_a_delete_on_one_node_outlasts_an_edit_on_another`, `tests/integration/cluster/test_partition_healing.py::test_a_delete_during_a_partition_reaches_the_isolated_node` |
+| **Tombstone not propagated within the grace TTL** (a partition longer than the TTL). | As above while partitioned, then `503` once the content's replicas have collected it (two TTLs after the delete) if the node is not a replica. On healing, the delete is undone if every other node has already purged the tombstone — the resurrection hazard of section 9. | `tests/integration/cluster/test_no_resurrection.py::test_purging_before_the_peer_saw_the_delete_resurrects_the_file`, `::test_gc_within_the_ttl_keeps_the_tombstone_so_the_delete_wins`, `::test_an_expired_tombstone_still_deletes_a_stale_live_copy` |
+| **New file not yet propagated**: uploaded elsewhere, record not here. | `404` and absent from listings and tag queries; then visible after the next round. | `tests/integration/cluster/test_partition_healing.py::test_a_write_made_while_a_node_was_away_reaches_it_on_healing` |
+| **Stale name or tags** after a remote rename or tag edit. | The old name, and tag queries answered with the old tag set: a file may be missing from, or wrongly included in, a result. | `tests/integration/cluster/test_partition_healing.py::test_edits_on_both_sides_of_a_partition_survive`, `tests/integration/cluster/test_metadata_replication.py::test_reads_are_served_locally` |
+| **Concurrent content `PATCH`** on two nodes. | Each node serves its own version until they exchange records; then every node serves the LWW winner. The loser's blob is orphaned and collected one TTL later. | `tests/unit/domain/test_merge_laws.py`, `tests/integration/cluster/test_gc.py::test_a_patch_orphaned_blob_is_collected_after_one_ttl` |
+
+Two properties hold in every row. A client never receives bytes that do not
+match the record it was served from — the blob is addressed by its hash — so
+staleness shows up as an *older coherent version*, a `404` for something not yet
+known, or a `503` for something known whose bytes are gone; never as a mix of
+versions. And every divergence is transient given connectivity, with the single
+exception of the partition-longer-than-TTL hazard, which is a configuration
+constraint (section 9).
+
+The grace TTL thus bounds two freshness windows at once: how long a stale node
+can keep serving a superseded version (the old blob's lifetime on up-to-date
+replicas) and how long a tombstone has to reach every node before it is purged.
+Both are "longest partition the deployment intends to survive".
+
+## 14. Deployment model
 
 There is one image (`docker/Dockerfile`) because there is one kind of node. A
 cluster is deployed by hand: `docker build`, `docker network create` (a
@@ -858,13 +954,14 @@ host
   table in the README). The peer list must include the node itself and be
   identical on every node, or nodes would rank different node sets for
   placement.
-- **Persistence**: `/data/blobs/` (one file per blob, written to a temp file and
-  renamed, so a crash never leaves a partial blob), `/data/metadata.db`
-  (SQLite in WAL mode) and `/data/gc_state.db` (the GC candidate table,
+- **Persistence**: `/data/blobs/` (one file per blob, written to a temp file,
+  flushed and renamed, so a crash never leaves a partial blob and a power loss
+  never loses an acknowledged one), `/data/metadata.db` (SQLite in WAL mode with
+  `synchronous = FULL`, section 13) and `/data/gc_state.db` (the GC candidate table,
   section 9). A stopped and restarted container resumes with its data, and its
   GC timers keep running from where they were.
 - **Logs**: the image sets `ALMACEN_LOG_FORMAT=json`, so `docker logs` emits one
-  JSON object per line (section 14).
+  JSON object per line (section 15).
 - **Failure injection**: `docker stop` / `docker start` for crashes;
   `docker network disconnect` / `connect` for partitions.
 - **Demo timings**: the documented commands shorten the gossip interval (2 s),
@@ -873,7 +970,7 @@ host
   The defaults (5 s, 15 s, 24 h) are the production values; the 20 s TTL is safe
   only because demo partitions last seconds (section 9).
 
-## 14. Observability
+## 15. Observability
 
 A distributed system is demonstrated by showing what each node believes, and
 two nodes can legitimately believe different things during a partition. Both
@@ -938,7 +1035,7 @@ exception backstop (`gossip_round_crashed`, `blob_catchup_crashed`,
 The complete table of events, their levels and fields is in the README's
 [Observability](../README.md#observability) section, and is not repeated here.
 
-## 15. Command-line client
+## 16. Command-line client
 
 `almacen-cli` (`almacen/cli/`, a Typer application installed as a console
 script by `pip install -e .`) covers every REST endpoint — `upload`, `list`,
@@ -976,8 +1073,8 @@ Two consequences of the design:
   timeout once, not per request.
 - Consecutive requests of one command, or consecutive commands, may be served by
   different nodes after a failover, and are then subject to the cross-node
-  staleness of section 12: a write just made through one node may not yet be
-  visible through the next.
+  staleness of sections 12 and 13: a write just made through one node may not
+  yet be visible through the next.
 
 To make failover possible, request bodies are sent as bytes, not streams: an
 upload reads the whole file into memory so the same body can be sent to the
@@ -988,7 +1085,7 @@ an error, `2` a usage error, `3` no node could be reached. `--json` prints the
 raw API response instead of a table. `status` reports a node that does not serve
 `/cluster/status` (an older version) as such, rather than as a generic `404`.
 
-## 16. Code map
+## 17. Code map
 
 | Package | Responsibility |
 | --- | --- |

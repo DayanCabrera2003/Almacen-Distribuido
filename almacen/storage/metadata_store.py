@@ -110,6 +110,13 @@ class MetadataStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # A metadata write is acknowledged once it commits here; the push to
+        # peers is best effort. FULL fsyncs the WAL on every commit, so an
+        # acknowledged write survives a power loss. NORMAL would keep the
+        # database consistent but could roll back the last commits, losing a
+        # write no peer has yet received. Set explicitly because the default
+        # is a compile-time option of the SQLite build.
+        self._conn.execute("PRAGMA synchronous = FULL")
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
