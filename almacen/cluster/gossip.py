@@ -240,7 +240,7 @@ class GossipLoop:
         if self._stop.is_set():
             return
         try:
-            collect(
+            result = collect(
                 store=self._store,
                 blob_store=self._blob_store,
                 gc_state=self._gc_state,
@@ -250,7 +250,16 @@ class GossipLoop:
                 should_stop=self._stop.is_set,
             )
         except Exception:  # noqa: BLE001
-            logger.exception("unexpected failure collecting garbage")
+            logger.exception("gc_round_crashed", node_id=self._settings.node_id)
+            return
+        # Idle rounds are the norm and stay silent; only real removals log.
+        if result and (result.purged or result.blobs_deleted):
+            logger.info(
+                "gc_round_completed",
+                node_id=self._settings.node_id,
+                purged=result.purged,
+                blobs_deleted=result.blobs_deleted,
+            )
 
     def start(self) -> None:
         if self._thread is not None:

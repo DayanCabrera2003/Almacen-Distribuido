@@ -263,6 +263,8 @@ The events worth filtering on:
 | `blob_fetch_failed` | info | `replica`, `content_hash`, `error` | A read fell through to the next replica |
 | `record_replication_failed` | warning | `peer`, `file_id`, `error` | A best-effort metadata push missed a peer |
 | `blob_caught_up` | info | `content_hash` | Anti-entropy fetched a blob this node is a replica for |
+| `tombstone_purged` / `blob_collected` | info | `file_id` / `content_hash` | GC removed a record past the grace TTL, or an orphaned blob |
+| `gc_round_completed` | info | `purged`, `blobs_deleted` | A GC round removed something (idle rounds stay silent) |
 
 `error` is the gRPC status code (`UNAVAILABLE`, `DEADLINE_EXCEEDED`) when there
 is one. Uvicorn's own lines go through the same renderer, so the stream stays

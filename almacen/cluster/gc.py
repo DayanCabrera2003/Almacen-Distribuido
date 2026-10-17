@@ -5,18 +5,19 @@ testable without a store or a clock.
 """
 from __future__ import annotations
 
-import logging
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+
+import structlog
 
 from almacen.domain.file_record import FileRecord
 from almacen.storage.blob_store import BlobStore
 from almacen.storage.gc_state import BlobGCState
 from almacen.storage.metadata_store import MetadataStore
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def is_expired_tombstone(record: FileRecord, now: datetime, grace: timedelta) -> bool:
@@ -135,7 +136,7 @@ def collect(
             return GCResult(purged=purged, blobs_deleted=0)
         if store.purge(file_id):
             purged += 1
-            logger.info("purged tombstone %s", file_id)
+            logger.info("tombstone_purged", file_id=str(file_id))
         done += 1
 
     if should_stop():
@@ -161,6 +162,6 @@ def collect(
         gc_state.clear({content_hash})
         deleted += 1
         done += 1
-        logger.info("collected blob %s", content_hash[:12])
+        logger.info("blob_collected", content_hash=content_hash[:12])
 
     return GCResult(purged=purged, blobs_deleted=deleted)
