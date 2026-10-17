@@ -214,9 +214,11 @@ pin-based model leaves to the operator.
 **Garbage collection tied to references, with a grace period.** IPFS GC removes
 whatever is unpinned on one node. Here a blob is collected only after no record
 on the node has referenced it for a full grace TTL, and tombstones themselves are
-only purged after a TTL (Phase 5), because in a replicated mutable system a
-premature deletion can be undone by a peer that has not yet heard of it — a
-problem immutable, independently-pinned data does not have.
+only purged after a TTL, because in a replicated mutable system a premature
+deletion can be undone by a peer that has not yet heard of it — a problem
+immutable, independently-pinned data does not have. For the same reason a node
+refuses to re-adopt a tombstone that is already past the TTL, so a purged record
+stays purged (architecture §9).
 
 **Whole-file blobs, no Merkle DAG.** IPFS chunks files into a DAG, which gives
 deduplication of shared blocks across files, verified streaming of large files,
@@ -332,7 +334,8 @@ complete:
   design uses a strict replica set, so a write fails if two of its three
   replicas are down. Dynamo returns conflicting versions (siblings) to the
   client for reconciliation; this design merges automatically with CRDTs and
-  logs LWW conflicts. Dynamo uses Merkle trees for anti-entropy; this design
+  logs the LWW conflicts it detects when a record is pushed to a node
+  (not those first met on the gossip pull). Dynamo uses Merkle trees for anti-entropy; this design
   exchanges a flat `file_id → vector clock` digest and defers Merkle trees.
 - **Rendezvous hashing** (Thaler and Ravishankar, 1998) — placement.
 - **SWIM** (Das, Gupta and Motivala, DSN 2002) — suspicion before declaring a
