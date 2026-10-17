@@ -1,4 +1,6 @@
 import hashlib
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -79,3 +81,48 @@ def test_delete_is_idempotent(blob_store: BlobStore):
 
     assert blob_store.delete(content_hash) is False
     assert blob_store.delete("0" * 64) is False
+
+
+def test_put_flushes_the_file_before_renaming_and_the_directory_after(
+    blob_store: BlobStore, monkeypatch: pytest.MonkeyPatch
+):
+    # A blob acknowledged to a quorum must survive a power loss, not only a
+    # process crash: its bytes have to reach the disk before the rename makes
+    # them visible, and the rename itself (a directory entry) has to reach the
+    # disk before `put` returns.
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def recording_fsync(fd: int) -> None:
+        kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        events.append(f"fsync-{kind}")
+        real_fsync(fd)
+
+    def recording_replace(src, dst) -> None:
+        events.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    monkeypatch.setattr(os, "replace", recording_replace)
+
+    content_hash = blob_store.put(b"durable")
+
+    assert events == ["fsync-file", "replace", "fsync-dir"]
+    assert blob_store.get(content_hash) == b"durable"
+
+
+def test_put_of_a_blob_already_held_writes_nothing(
+    blob_store: BlobStore, monkeypatch: pytest.MonkeyPatch
+):
+    content_hash = blob_store.put(b"already here")
+    calls: list[int] = []
+    monkeypatch.setattr(os, "fsync", calls.append)
+
+    assert blob_store.put(b"already here") == content_hash
+    assert calls == []
+
+
+def test_put_leaves_no_temporary_file_behind(blob_store: BlobStore, tmp_path: Path):
+    content_hash = blob_store.put(b"clean")
+
+    assert [p.name for p in (tmp_path / "blobs").iterdir()] == [content_hash]
