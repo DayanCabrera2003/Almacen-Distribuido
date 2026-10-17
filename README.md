@@ -65,7 +65,8 @@ Still missing: OR-Set remove entries for tags are never pruned (safe pruning
 needs every node to have observed the removal, which this design does not
 track). Of Phase 6, `GET /cluster/status` and structured logging (see
 [Observability](#observability)) and the [command-line
-client](#command-line-client) are in place; the chaos tests are not yet.
+client](#command-line-client) and the seeded [chaos tests](#chaos-tests) are
+in place.
 
 ### Upgrading from Phase 2
 
