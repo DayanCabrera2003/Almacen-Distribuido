@@ -316,10 +316,21 @@ is the record's `content_hash` repointed.
 
 - **Listing and tag queries** (`GET /files?tags=...&mode=and|or`) are answered
   entirely from the local metadata replica by `TagIndex`
-  (`almacen/storage/tag_index.py`), which filters the live records with set
-  containment (AND) or intersection (OR). This is a linear scan over live
-  records, which is the right trade at this scale; an inverted index is the
-  obvious next step and is not implemented.
+  (`almacen/storage/tag_index.py`) through an inverted index: the OR-Set's add
+  occurrences (`file_tag_adds`) indexed by tag (`idx_file_tag_adds_tag`) are
+  the postings lists. One SQL query (`MetadataStore.find_live_by_tags`) seeks
+  the queried tags, keeps an add occurrence only if no remove cancels that exact
+  occurrence (an anti-join on `(file_id, tag, node_id, counter)`, which is the
+  OR-Set's `adds - removes`), groups by file — AND keeps files that matched
+  all `k` distinct tags (`HAVING COUNT(DISTINCT tag) = k`), OR keeps any —
+  and drops tombstoned files. Only the matching records are then decoded, with
+  their tag state read in batches rather than two queries per record. The cost
+  is proportional to the postings of the queried tags, not to the number of
+  live files. Nothing extra is maintained on writes: the occurrence tables
+  every write path already keeps are the index, so it cannot drift from the
+  CRDT state. A property test checks the query against the old linear filter
+  over randomized multi-node histories (adds, removes, merges, deletes,
+  purges). A request without tags still lists every live file.
 - **Download** (`GET /files/{id}`) reads the record locally (404 if unknown or
   tombstoned), then fetches the blob: from local disk if this node holds it,
   otherwise from the replicas in HRW order, stopping at the first one that

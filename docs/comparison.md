@@ -311,12 +311,18 @@ them. No negation, no nesting of AND inside OR, no ranges over typed attributes,
 and no live queries. These would be straightforward extensions over a local
 index; they were not needed by the assignment.
 
-**A scan instead of an index structure.** BFS keeps B+tree indexes; a tag file
-system would keep posting lists per tag. `TagIndex` currently filters every live
-record on each query — O(live files) per query. At the target scale this is
-simpler and fast enough, and correctness (tombstoned files never appear) is easy
-to see. An inverted index (tag → file ids) maintained on each merge is the
-obvious next step if the corpus grows.
+**Posting lists derived from the CRDT state.** BFS keeps B+tree indexes; a tag
+file system keeps posting lists per tag. Here the posting lists are the OR-Set's
+add occurrences, stored in SQLite with a B-tree index on the tag
+(`idx_file_tag_adds_tag`). A query seeks the queried tags, discards occurrences
+cancelled by a remove, and intersects (AND) or unions (OR) per file in one SQL
+statement, so its cost follows the size of those posting lists rather than the
+number of live files. Unlike a separately maintained tag → file-ids map, there
+is no second structure to keep in step on every merge: the index is the CRDT
+state itself, so it is correct by construction. What it does not do is the
+optimal AND strategy — a galloping intersection that walks the shortest list
+and skips through the longer ones; SQLite touches the union of the `k` lists
+instead.
 
 ---
 
