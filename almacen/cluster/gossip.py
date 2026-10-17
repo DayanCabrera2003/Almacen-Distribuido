@@ -12,6 +12,7 @@ import grpc
 import structlog
 
 from almacen.cluster.channels import ChannelPool
+from almacen.cluster.conflicts import log_if_concurrent
 from almacen.cluster.gc import collect, is_expired_tombstone
 from almacen.cluster.membership import Membership
 from almacen.cluster.placement import replica_set
@@ -78,8 +79,12 @@ def gossip_once(
         # has already purged, or would purge on its next round anyway.
         grace = timedelta(seconds=settings.grace_ttl_seconds)
         for message in delta.records:
+            incoming = message_to_record(message)
+            log_if_concurrent(
+                log, store.get(incoming.file_id), incoming, sender=peer.node_id
+            )
             store.merge_remote(
-                message_to_record(message),
+                incoming,
                 refuse_unknown=lambda r: is_expired_tombstone(r, now, grace),
             )
 

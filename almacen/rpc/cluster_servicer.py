@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import grpc
 import structlog
 
+from almacen.cluster.conflicts import log_if_concurrent
 from almacen.cluster.gc import is_expired_tombstone
 from almacen.cluster.membership import Membership
 from almacen.cluster.reconciliation import build_digest, plan_exchange
@@ -63,20 +64,12 @@ class ClusterServicer(pb_grpc.ClusterServicer):
                 )
             raise
 
-        local = self._metadata_store.get(record.file_id)
-        if local is not None and local.is_concurrent_with(record):
-            # Spec §9: a genuine conflict is resolved by last-writer-wins, but
-            # never silently. Logging both clocks is what makes the resolution
-            # auditable — LWW discards one of two concurrent writes, and that
-            # loss should be visible rather than inferred.
-            self._log.warning(
-                "concurrent_update_resolved",
-                file_id=str(record.file_id),
-                sender=context.peer() if context is not None else "unknown",
-                local_clock=dict(local.vector_clock.counters),
-                incoming_clock=dict(record.vector_clock.counters),
-                resolution="last_writer_wins",
-            )
+        log_if_concurrent(
+            self._log,
+            self._metadata_store.get(record.file_id),
+            record,
+            sender=context.peer() if context is not None else "unknown",
+        )
 
         # Merge, never overwrite. An incoming record is one replica's view, not
         # the truth: the local copy may hold edits the sender never saw.

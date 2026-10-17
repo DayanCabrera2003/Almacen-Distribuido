@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from almacen.cluster.channels import ChannelPool
 from almacen.cluster.gossip import gossip_once
@@ -191,3 +192,35 @@ def test_an_undecodable_record_is_reported_not_raised(pair, monkeypatch):
     monkeypatch.setattr(gossip_module, "message_to_record", explode)
 
     assert run_round(nodes, peers, channels, "node1") is False
+
+
+def test_a_conflict_found_by_the_pull_is_logged_by_the_puller(pair):
+    # The pushed half of a round reaches the peer through ReplicateRecord,
+    # which logs conflicts there. The pulled half merges on the initiator, and
+    # a conflict resolved there must be just as visible.
+    nodes, peers, channels = pair
+    base = FileRecord.new(name="a.txt", content_hash="h", node_id="node1")
+    for node_id in PEERS:
+        nodes[node_id]["store"].insert(base.copy())
+    local = nodes["node1"]["store"].mutate(
+        base.file_id, lambda r: r.rename("one", "node1")
+    )
+    remote = nodes["node2"]["store"].mutate(
+        base.file_id, lambda r: r.rename("two", "node2")
+    )
+
+    with capture_logs() as logs:
+        run_round(nodes, peers, channels, "node1")
+
+    conflicts = [
+        e
+        for e in logs
+        if e["event"] == "concurrent_update_resolved" and e["node_id"] == "node1"
+    ]
+    assert conflicts, "a conflict resolved on the pull must be logged"
+    [conflict] = conflicts
+    assert conflict["file_id"] == str(base.file_id)
+    assert conflict["sender"] == "node2"
+    assert conflict["local_clock"] == local.vector_clock.counters
+    assert conflict["incoming_clock"] == remote.vector_clock.counters
+    assert conflict["resolution"] == "last_writer_wins"
