@@ -14,12 +14,8 @@ departs from the spec, this document says so.
 
 The comparison with CephFS, IPFS and semantic file systems requested by the
 assignment is in [comparison.md](comparison.md). How to deploy a cluster is in
-[deployment.md](deployment.md).
-
-**Scope note.** Phases 1-4 are implemented. Phase 5 (tombstone purge and blob
-garbage collection) is described here according to its implementation plan,
-`docs/superpowers/plans/2026-09-29-phase5-deletion-and-gc.md`; section 9 marks
-the parts that come from that plan.
+[deployment.md](deployment.md). The configuration variables, the REST API and
+the full list of log events are in the [README](../README.md).
 
 ---
 
@@ -49,6 +45,8 @@ diverge, and the design has to state what a client can observe when it does.
 | Deletion | Tombstones, grace TTL, reference-counted blob GC | 9 |
 | Interfaces | REST (FastAPI) for clients, gRPC between nodes | 4 |
 | Deployment | One Docker image, one `docker run` per node, no orchestration file | 13 |
+| Observability | `GET /cluster/status` per node; structured (JSON) log events | 14 |
+| Client | `almacen-cli` over the REST API, failing over between nodes | 15 |
 
 ## 3. Consistency model: why AP
 
@@ -74,14 +72,14 @@ There is exactly one kind of node. Every node runs the same image and the same
 process, and plays every role:
 
 ```
-                 clients (curl, browser, scripts)
+             clients (almacen-cli, curl, browser, scripts)
                               |
                          REST / HTTP
                               |
 +-----------------------------v------------------------------------+
 | node                                                             |
 |                                                                  |
-|  api/  FastAPI routers: /files, /files/{id}/tags                 |
+|  api/  FastAPI routers: /files, /files/{id}/tags, /cluster/status|
 |    |                                                             |
 |    +--> ReplicatedMetadataStore --> MetadataStore (SQLite, WAL)  |
 |    |       (write locally, then         full replica of every    |
@@ -95,8 +93,9 @@ process, and plays every role:
 |                                       replica for                |
 |                                                                  |
 |  GossipLoop (background thread, every 5 s)                       |
-|    gossip round -> blob catch-up -> GC (Phase 5)                 |
+|    gossip round -> blob catch-up -> GC                           |
 |    Membership: SWIM-style alive / suspect / dead view            |
+|    BlobGCState (SQLite, gc_state.db): when each orphan appeared  |
 |                                                                  |
 |  gRPC server: Cluster   (ReplicateRecord, Gossip, Ping)          |
 |               Replication (PutBlob, GetBlob — streamed)          |
@@ -288,7 +287,7 @@ Step by step (`almacen/api/routers/files.py`,
 5. If the quorum is not reached the client gets `503` and **no metadata is
    written**, so no record can ever point at content that was not stored
    durably. Replicas that did accept the blob keep an unreferenced copy, which
-   Phase 5's garbage collector reclaims (section 9).
+   the garbage collector reclaims one grace TTL later (section 9).
 
 The order — content first, metadata second — is what keeps the invariant
 "metadata never references content below quorum". The reverse order would make
@@ -410,9 +409,14 @@ other has?" exactly, and is used for two things:
 - **Anti-entropy**: comparing clocks decides which records two nodes need to
   exchange (section 11).
 - **Conflict visibility**: when a record arrives through `ReplicateRecord` and
-  its clock is concurrent with the local one, the node logs a warning with both
-  clocks before resolving by LWW, so a discarded concurrent write is visible in
-  the logs rather than silent.
+  its clock is concurrent with the local one, the node logs a
+  `concurrent_update_resolved` warning with both clocks before resolving by
+  LWW, so a discarded concurrent write is visible in the logs rather than
+  silent. Only that receive path logs. `ReplicateRecord` carries both direct
+  pushes and the push half of a gossip exchange, so a conflict is logged by the
+  gossip *responder*; the pull half (the initiator merging the records in the
+  responder's reply, in `gossip_once`) merges without checking, so a conflict
+  first detected there is resolved identically but silently on that node.
 
 The clock deliberately does **not** take part in the merge. An earlier version
 of the spec let a dominating clock win outright; that rule breaks
@@ -432,8 +436,9 @@ the event loop, so one slow peer does not stall other requests.
 
 ## 9. Deletion and garbage collection
 
-> Steps 1-2 are implemented. Steps 3-5 are Phase 5, described per its
-> implementation plan.
+Deletion is the one place where this system destroys data, in a system whose
+anti-entropy otherwise *restores* missing data from peers. The whole design of
+this section follows from keeping those two from fighting each other.
 
 ```mermaid
 stateDiagram-v2
@@ -459,21 +464,37 @@ stateDiagram-v2
    tombstoned records in its digests on purpose. Until it reaches a node, that
    node still serves the file. This is the AP model's normal inconsistency
    window, not a special case.
-3. **Purge after a grace TTL.** A tombstoned record whose tombstone is older
-   than `ALMACEN_GRACE_TTL_SECONDS` (default 24 h) is removed from the store.
-   The TTL is measured from when the delete *originated* (the tombstone's
-   timestamp), not from when this node learned of it.
+3. **Purge after a grace TTL.** A tombstoned record whose tombstone is at least
+   `ALMACEN_GRACE_TTL_SECONDS` old (default 24 h) is removed from the store
+   (`MetadataStore.purge`, its tag occurrences included). The TTL is measured
+   from when the delete *originated* — the tombstone's own timestamp — not from
+   when this node learned of it: it bounds how long the tombstone has had to
+   reach every peer, which is a property of the delete, not of the observer. A
+   tombstone without a timestamp is never considered expired.
 4. **Blob reference counting.** On each round, every node counts how many of its
    own records — **including tombstoned, not-yet-purged ones** — point at each
-   blob it holds. A blob with zero references becomes a *candidate*, and the
-   moment it became one is persisted. A candidate that is still unreferenced
-   one grace TTL later is deleted; one that regains a referrer (identical
-   content re-uploaded, or a record re-learned through gossip) stops being a
-   candidate.
-5. **Scheduling.** GC runs as a third step of the gossip loop, after blob
-   catch-up, with a per-round budget so it cannot monopolise a tick. Running
-   after catch-up avoids deleting a blob in the same tick a record that needs it
-   was learned.
+   blob it holds (`MetadataStore.reference_counts`). A blob with zero references
+   becomes a *candidate*, and the moment it became one is persisted in a
+   separate SQLite file, `gc_state.db` (`almacen/storage/gc_state.py`).
+   Re-marking an existing candidate does not restart its clock. A candidate
+   that is still unreferenced one grace TTL later is deleted from disk; one
+   that regains a referrer (identical content re-uploaded, or a record
+   re-learned through gossip) stops being a candidate.
+5. **Scheduling.** GC is the third step of each gossip tick, after the gossip
+   round and blob catch-up (`GossipLoop.run_once`). Running after catch-up
+   avoids deleting a blob in the same tick a record that needs it was learned.
+   Within one GC round records are purged first and references recounted
+   afterwards, so a blob orphaned by this round's purge becomes a candidate in
+   the same round rather than a tick late. At most `ALMACEN_GC_BUDGET` (default
+   32) irreversible operations — purges plus blob deletions — run per round, and
+   the loop's stop flag is checked before each, so GC can neither monopolise a
+   tick nor delay shutdown. GC runs on the gossip loop, so disabling gossip
+   (`ALMACEN_GOSSIP_INTERVAL_SECONDS` ≤ 0) disables it too.
+6. **No re-adoption of expired tombstones** (next subsection).
+
+The rules themselves are pure functions of the records, the candidate table and
+the time (`almacen/cluster/gc.py`: `is_expired_tombstone`, `records_to_purge`,
+`blobs_to_delete`); `collect` applies them to one node's stores.
 
 ### Why the grace TTL is a safety property
 
@@ -482,10 +503,51 @@ a node purges a tombstone while some partitioned peer still holds the live
 version, the next gossip round after the partition heals teaches that live
 version back — the deletion is silently undone. The grace TTL is the window
 during which every peer is expected to have received the tombstone; **it must
-exceed the longest partition the deployment intends to survive**. Too short
-resurrects deleted files; too long only costs disk space. The demo deployment
-shortens it so the lifecycle is observable, which is safe only because demo
-partitions last seconds.
+exceed the longest partition (or outage) the deployment intends to survive**.
+Too short resurrects deleted files; too long only costs disk space. The demo
+deployment shortens it to 20 s so the lifecycle is observable, which is safe
+only because demo partitions last seconds.
+
+### Expired tombstones are not re-adopted
+
+This rule is not in the design spec; it was added after the steps above proved
+insufficient on their own. On a live five-node cluster the purged record kept
+coming back — never as a live file, but as a tombstone that bounced between
+nodes indefinitely. The cause is the order of a tick: each node gossips
+*before* it collects, and nodes purge on their own ticks, so at any moment some
+have purged a given tombstone and some have not yet. To the digest comparison
+(section 11), a node that has purged the record is simply missing it, so a peer
+that still holds it sends it over; the purged node adopts it, purges it again a
+tick later, and in the meantime hands it on to another node that had already
+purged it.
+
+The fix is a rule at the point of adoption. `MetadataStore.merge_remote` takes a
+`refuse_unknown` predicate, consulted only when the store does **not** hold the
+incoming record, under the same lock as the insert. Both receive paths pass
+`is_expired_tombstone` with the node's grace TTL:
+
+- the gossip pull, when the initiator merges the records in the responder's
+  reply (`gossip_once`);
+- `ClusterServicer.ReplicateRecord`, which receives both direct pushes and the
+  push half of every gossip exchange.
+
+So a node refuses a record it does not hold when that record is a tombstone
+already past the grace TTL. Why this is safe:
+
+- **It cannot resurrect anything.** Refusing an expired tombstone is equivalent
+  to adopting it and purging it in the same instant — the node would purge it on
+  its next round anyway, by the same predicate. Only an incoming *live* copy can
+  resurrect a file, and live records are never refused.
+- **It does not weaken deletes.** A record the node *does* hold always merges.
+  So a node that was partitioned for longer than the TTL and still holds the
+  file live does receive the expired tombstone, the merge tombstones its copy,
+  and it purges on its next round. (What the rule cannot do is help once every
+  other node has already purged: then nobody has a tombstone to send, the live
+  copy is taught back, and the delete is undone — which is exactly the
+  "partition longer than the TTL" hazard above.)
+- **It stops the bounce.** A node that has purged a tombstone can no longer be
+  taught it back, so once each node's own GC has removed an expired tombstone
+  it stays removed, and the record disappears from the cluster.
 
 ### Both orphan paths, one mechanism
 
@@ -494,16 +556,32 @@ A blob becomes unreferenced in two ways:
 - its record is **deleted and later purged**: the tombstoned record keeps
   referencing the blob until the purge, so the blob becomes a candidate only
   then and is deleted one TTL later — about **two TTLs after the delete**, which
-  deliberately errs towards over-retention;
+  deliberately errs towards over-retention: the record's TTL protects nodes that
+  have not heard of the delete, the blob's protects nodes that may still need to
+  read the content;
 - a live record is **repointed by `PATCH`**: the old blob loses its referrer
   immediately and is deleted one TTL later.
 
 A blob that no record ever referenced (left behind by an upload that missed its
 quorum) is a candidate by the same rule.
 
+Measured on a live five-node cluster with a 20 s TTL and 2 s gossip interval:
+the record was purged on every node about 22 s after the `DELETE`, its blob
+deleted from its replicas about 42 s after it (two TTLs), and the blob orphaned
+by a `PATCH` about 20 s after the `PATCH`. The extra seconds are the wait for
+the next tick.
+
 Reference counts are **local**: each node counts its own full metadata replica.
-No distributed reference count is needed, because every node holds every record
-and placement is deterministic.
+No distributed reference count is needed, because every node eventually holds
+every record, and the grace TTL covers the window before a referrer created
+elsewhere arrives. The remaining race — identical bytes re-uploaded between the
+recount and the deletion — costs only that node's copy: the record survives, and
+blob catch-up (section 11) fetches the content back from another replica.
+
+The candidate table is persisted because it cannot be recomputed: once the last
+referrer is gone, nothing else remembers when that happened. Losing it would be
+safe (every timer would restart, so blobs are kept longer, never deleted early),
+but a node that restarts often would then never collect anything.
 
 ### Not collected
 
@@ -549,7 +627,8 @@ The view is used for one thing: choosing gossip partners — each round picks up
 to `ALMACEN_GOSSIP_FANOUT` random peers that are not dead. It does **not**
 change placement (section 6) or the replica set of a write: membership is
 static (`ALMACEN_PEERS`), and the failure detector exists to avoid wasting
-rounds on dead peers and to make the cluster's view of itself observable.
+rounds on dead peers and to make the cluster's view of itself observable
+(`GET /cluster/status`, section 14).
 
 Like any failure detector in an asynchronous system it can be wrong — a slow
 node is indistinguishable from a dead one — and it is designed to be wrong only
@@ -574,8 +653,12 @@ sequenceDiagram
     A->>B: ReplicateRecord for each wanted file_id
     Note over B: merge on receipt
     A->>A: blob catch-up (budget 8)
-    A->>A: GC step (Phase 5)
+    A->>A: GC round (budget 32)
 ```
+
+Both receive paths — the initiator merging B's reply, and B merging the
+`ReplicateRecord` pushes — refuse to adopt an expired tombstone they do not
+hold (section 9).
 
 ### The digest comparison
 
@@ -655,8 +738,11 @@ digests, which make the steady state O(log n), are deferred (spec §11, §17).
   causally later write win LWW regardless of clock skew.
 - **Delete wins** over concurrent edits of the same file, and a deleted file is
   a `404` on every endpoint of every node the tombstone has reached.
-- **No resurrection** after purge, provided every partition is shorter than the
-  grace TTL (Phase 5).
+- **No resurrection** after purge, provided every partition (and every node
+  outage) is shorter than the grace TTL.
+- **A purge sticks.** A tombstone past the grace TTL is never re-adopted by a
+  node that no longer holds the record (section 9), so expired tombstones do not
+  circulate between nodes after they are purged.
 - **Local atomicity.** No update acknowledged by a node is lost to a concurrent
   update on the same node.
 - **Availability of metadata operations** on every running node, including a
@@ -669,8 +755,10 @@ digests, which make the steady state O(log n), are deferred (spec §11, §17).
   node1 and reads from node5 may see the old state until the update arrives.
   Same-node read-your-writes does hold.
 - **Preservation of both sides of a concurrent rename or content change.** LWW
-  keeps one; the other is logged, not surfaced. Dynamo-style sibling versions
-  are out of scope.
+  keeps one; the other is not surfaced to clients. Dynamo-style sibling
+  versions are out of scope. The conflict is logged only when it is detected on
+  the `ReplicateRecord` path, not on the gossip pull (section 8), so the log is
+  not a complete record of every conflict.
 - **Which concurrent write wins is clock-dependent.** Between genuinely
   concurrent writes, the node with the faster clock wins. A node with a badly
   fast clock drags a record's timestamps forward.
@@ -690,6 +778,13 @@ digests, which make the steady state O(log n), are deferred (spec §11, §17).
 - **Bounded metadata size.** OR-Set remove sets are never pruned; digests grow
   linearly with the number of records.
 - **Version history.** Previous content is not retrievable.
+- **Exact or synchronised GC timing.** Each node purges and collects on its own
+  gossip tick, against its own clock, so nodes remove the same record and the
+  same blob at slightly different moments. A tombstone's age is measured from
+  the deleting node's timestamp, so a slow clock there makes every node purge
+  sooner (bounded below by the record's own creation time, section 8).
+- **Prompt disk reclamation.** A deleted file's content stays on disk for about
+  two grace TTLs, by design (section 9).
 
 ## 13. Deployment model
 
@@ -716,24 +811,146 @@ host
   identical on every node, or nodes would rank different node sets for
   placement.
 - **Persistence**: `/data/blobs/` (one file per blob, written to a temp file and
-  renamed, so a crash never leaves a partial blob) and `/data/metadata.db`
-  (SQLite in WAL mode). A stopped and restarted container resumes with its data.
+  renamed, so a crash never leaves a partial blob), `/data/metadata.db`
+  (SQLite in WAL mode) and `/data/gc_state.db` (the GC candidate table,
+  section 9). A stopped and restarted container resumes with its data, and its
+  GC timers keep running from where they were.
+- **Logs**: the image sets `ALMACEN_LOG_FORMAT=json`, so `docker logs` emits one
+  JSON object per line (section 14).
 - **Failure injection**: `docker stop` / `docker start` for crashes;
   `docker network disconnect` / `connect` for partitions.
-- **Demo timings**: the documented commands shorten the gossip interval (2 s)
-  and suspicion timeout (6 s), and Phase 5 adds a short grace TTL, so
-  reconciliation, failure detection and garbage collection are observable
-  within a session. The defaults (5 s, 15 s, 24 h) are the production values.
+- **Demo timings**: the documented commands shorten the gossip interval (2 s),
+  the suspicion timeout (6 s) and the grace TTL (20 s), so reconciliation,
+  failure detection and garbage collection are observable within a session.
+  The defaults (5 s, 15 s, 24 h) are the production values; the 20 s TTL is safe
+  only because demo partitions last seconds (section 9).
 
-## 14. Code map
+## 14. Observability
+
+A distributed system is demonstrated by showing what each node believes, and
+two nodes can legitimately believe different things during a partition. Both
+observability mechanisms are therefore **per node**: there is no aggregated
+cluster view, and none is needed to follow a demo.
+
+### `GET /cluster/status`
+
+Any node answers with its own view (`almacen/api/routers/cluster.py`,
+response models in `almacen/api/schemas.py`):
+
+| Field | Content |
+| --- | --- |
+| `node_id` | The answering node |
+| `members` | Every node in its membership view, itself included, sorted by id: `node_id`, `address` (from `ALMACEN_PEERS`), `state` (`alive` / `suspect` / `dead`), `incarnation`, `since` (when this node last saw that member change state; `null` for itself and for a peer never seen to change), `is_self` |
+| `replication` | `replication_factor`, `write_quorum`, `rpc_timeout_seconds` |
+| `gossip` | `enabled`, `interval_seconds`, `fanout`, `suspicion_timeout_seconds`, `blob_catchup_budget` |
+| `gc` | `grace_ttl_seconds`, `budget` |
+| `storage` | `live_records`, `tombstones`, `blobs` — counts of this node's local state |
+
+The membership part is one `Membership.snapshot` taken under the membership
+lock, so it is a consistent cut even while the gossip thread merges into it.
+The storage counts are read separately (each exact, not taken at the same
+instant as the membership). Record counts come from a `GROUP BY` over the
+`files` table rather than decoding every record. Once gossip has converged,
+`live_records` and `tombstones` should agree on every node, because metadata is
+fully replicated; `blobs` differs, because each node holds only its shard. A
+`tombstones` count that falls to zero after the grace TTL is the visible effect
+of section 9's purge. The handler is a plain `def`, so FastAPI runs its blocking
+SQLite and filesystem reads on a worker thread rather than the event loop.
+
+### Structured logging
+
+Logging is configured once, before the app is built
+(`almacen/observability.py`, called from `almacen/main.py`). structlog events
+and standard-library records — including uvicorn's own loggers, whose handlers
+are replaced so they propagate — go through one `ProcessorFormatter`, so the
+whole stream has one format:
+
+- `ALMACEN_LOG_FORMAT=console` (the default) renders coloured lines for a
+  terminal; `json` renders one JSON object per line. The Docker image sets
+  `json`, so `docker logs` output can be filtered by field.
+- `ALMACEN_LOG_LEVEL` (default `INFO`) is the minimum level.
+- Every entry carries `event`, `level`, `logger`, an ISO-8601 UTC `timestamp`
+  and a `node_id`. The node id is a *default* taken from `ALMACEN_NODE_ID`;
+  components bind their own, which keeps several in-process nodes
+  distinguishable in the test suite.
+
+Cluster code logs **named events with key/value fields**, not sentences: a round
+of gossip is `gossip_round_completed` with `peer`, `pulled` and `pushed`; a
+membership transition is `member_state_changed` with `from_state`, `to_state`
+and a `reason`, logged once per transition as this node first observes it; GC
+logs `tombstone_purged`, `blob_collected` and, when a round removed anything,
+`gc_round_completed` (idle rounds stay silent). Failures carry an `error` field
+holding the gRPC status code (`UNAVAILABLE`, `DEADLINE_EXCEEDED`) rather than
+gRPC's multi-line error text. An unreachable peer during gossip is logged at
+`info`, since it is the routine case anti-entropy exists for; a peer that fails
+after answering is a `warning`. The three steps of a gossip tick each have an
+exception backstop (`gossip_round_crashed`, `blob_catchup_crashed`,
+`gc_round_crashed`) that logs the traceback and lets the loop continue.
+
+The complete table of events, their levels and fields is in the README's
+[Observability](../README.md#observability) section, and is not repeated here.
+
+## 15. Command-line client
+
+`almacen-cli` (`almacen/cli/`, a Typer application installed as a console
+script by `pip install -e .`) covers every REST endpoint — `upload`, `list`,
+`download` (alias `get`), `update`, `delete`, `tag list|add|remove`, `status` —
+so the cluster can be operated without curl. It is a pure REST client: it has
+no access to gRPC and no knowledge of placement, and relies on the fact that any
+node can serve any request (section 4). Usage is in the README.
+
+### Failover between nodes
+
+`--node` (or `ALMACEN_NODE_URL`) accepts a comma-separated list of node URLs.
+`NodeClient` (`almacen/cli/client.py`) sends each request to the first node in
+the list and moves on to the next **only on a connection error** —
+`httpx.ConnectError` or `httpx.ConnectTimeout`, i.e. errors raised before the
+request reached any node. A warning names each node skipped.
+
+It never fails over once the request may have reached a node:
+
+- a node that answered — with any status, including `404` or `503` — is final:
+  the error is reported, not retried elsewhere;
+- a read or write timeout after the connection was established is reported, not
+  retried.
+
+The reason is that not every write in the API is idempotent. An upload
+creates a new `file_id` each time, and retrying a `POST /files` whose response
+was lost would store the file twice under two identities; a repeated `PATCH` or
+tag edit would be stamped as a second, causally later write. Because the CLI cannot tell
+whether a node that stopped responding mid-request applied it, it only retries
+when it knows the node did not.
+
+Two consequences of the design:
+
+- The node that answered moves to the front of the list, so a command issuing
+  several requests (`tag remove` sends one per tag) pays a dead node's connect
+  timeout once, not per request.
+- Consecutive requests of one command, or consecutive commands, may be served by
+  different nodes after a failover, and are then subject to the cross-node
+  staleness of section 12: a write just made through one node may not yet be
+  visible through the next.
+
+To make failover possible, request bodies are sent as bytes, not streams: an
+upload reads the whole file into memory so the same body can be sent to the
+next node.
+
+Exit status separates the failure modes: `0` success, `1` a node answered with
+an error, `2` a usage error, `3` no node could be reached. `--json` prints the
+raw API response instead of a table. `status` reports a node that does not serve
+`/cluster/status` (an older version) as such, rather than as a generic `404`.
+
+## 16. Code map
 
 | Package | Responsibility |
 | --- | --- |
 | `almacen/domain/` | `FileRecord`: the CRDT-backed entity, mutations and merge. No I/O. |
 | `almacen/crdt/` | `LWWRegister`, `OrSet`, `VectorClock`. Pure. |
-| `almacen/storage/` | `BlobStore` (filesystem), `MetadataStore` (SQLite), `TagIndex` (queries) |
-| `almacen/cluster/` | Placement (HRW), replication client (W-of-R), metadata replicator, membership, reconciliation, gossip loop, GC (Phase 5) |
-| `almacen/rpc/` | Protos, generated stubs, servicers, codecs between records and messages |
-| `almacen/api/` | FastAPI routers, schemas, dependency providers |
+| `almacen/storage/` | `BlobStore` (filesystem), `MetadataStore` (SQLite: records, merge, purge, reference counts), `TagIndex` (queries), `BlobGCState` (SQLite: GC candidates and when each became one) |
+| `almacen/cluster/` | Placement (HRW), replication client (W-of-R), metadata replicator, membership, reconciliation, gossip loop and blob catch-up (`gossip.py`), GC rules and collector (`gc.py`) |
+| `almacen/rpc/` | Protos, generated stubs, servicers (`ReplicateRecord` and `Gossip` apply the expired-tombstone refusal), codecs between records and messages |
+| `almacen/api/` | FastAPI routers (`files`, `tags`, `cluster`), schemas, dependency providers |
+| `almacen/cli/` | `almacen-cli`: Typer commands per resource, `NodeClient` with connection-only failover, output rendering |
+| `almacen/observability.py` | structlog and stdlib logging configuration (console or JSON) |
 | `almacen/config.py` | `Settings` from the environment |
-| `almacen/main.py` | Wires one node together; the lifespan starts gRPC and then gossip, and stops them in reverse order |
+| `almacen/main.py` | Configures logging, wires one node together; the lifespan starts gRPC and then gossip, and stops them in reverse order |
