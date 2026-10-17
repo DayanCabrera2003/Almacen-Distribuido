@@ -74,14 +74,14 @@ DAA/blob-reference-counting.md      # NEW (untracked)
 
 **Files:** Modify `almacen/config.py`, `almacen/storage/blob_store.py`, `almacen/storage/metadata_store.py`; create `almacen/storage/gc_state.py`
 
-- [ ] **Step 1: Settings** — `grace_ttl_seconds` (default `86400.0`, i.e. 24h) and
+- [x] **Step 1: Settings** — `grace_ttl_seconds` (default `86400.0`, i.e. 24h) and
 `gc_budget` (default `32`), both validated positive, both with `ALMACEN_*`
 variables. Tests mirroring the existing config tests, including that the default
 really is 24 hours — the demo overrides it, and a default of "a few minutes"
 silently shipped to a real deployment would be the bug this whole phase is
 about.
 
-- [ ] **Step 2: `BlobStore.list_hashes()` and `BlobStore.delete()`**
+- [x] **Step 2: `BlobStore.list_hashes()` and `BlobStore.delete()`**
 
 ```python
     def list_hashes(self) -> set[str]:
@@ -106,7 +106,7 @@ about.
         return True
 ```
 
-- [ ] **Step 3: `MetadataStore.purge()` and `MetadataStore.reference_counts()`**
+- [x] **Step 3: `MetadataStore.purge()` and `MetadataStore.reference_counts()`**
 
 ```python
     def purge(self, file_id: uuid.UUID) -> bool:
@@ -140,7 +140,7 @@ about.
             return {content_hash: count for content_hash, count in rows}
 ```
 
-- [ ] **Step 4: `gc_state.py` — when each blob became unreferenced**
+- [x] **Step 4: `gc_state.py` — when each blob became unreferenced**
 
 A tiny store of its own rather than more columns on `files`, because the row is
 keyed by content hash and outlives every record that pointed at it.
@@ -166,7 +166,7 @@ class BlobGCState:
 Reuse the same locking discipline as `MetadataStore`; a separate SQLite file
 keeps it independent of the metadata schema.
 
-- [ ] **Step 5: Tests, then commit** — `git commit -m "Add storage primitives for purging records and collecting blobs"`
+- [x] **Step 5: Tests, then commit** — `git commit -m "Add storage primitives for purging records and collecting blobs"`
 
 ---
 

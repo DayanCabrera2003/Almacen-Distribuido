@@ -15,6 +15,11 @@ DEFAULT_GOSSIP_INTERVAL_SECONDS = 5.0
 DEFAULT_SUSPICION_TIMEOUT_SECONDS = 15.0
 DEFAULT_GOSSIP_FANOUT = 2
 DEFAULT_BLOB_CATCHUP_BUDGET = 8
+# 24 hours. This is the safety margin that stops a deleted file being resurrected
+# by a node returning from a partition, so the production default is deliberately
+# long; the demo deployment overrides it to seconds.
+DEFAULT_GRACE_TTL_SECONDS = 86400.0
+DEFAULT_GC_BUDGET = 32
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,8 @@ class Settings:
     suspicion_timeout_seconds: float = DEFAULT_SUSPICION_TIMEOUT_SECONDS
     gossip_fanout: int = DEFAULT_GOSSIP_FANOUT
     blob_catchup_budget: int = DEFAULT_BLOB_CATCHUP_BUDGET
+    grace_ttl_seconds: float = DEFAULT_GRACE_TTL_SECONDS
+    gc_budget: int = DEFAULT_GC_BUDGET
 
     def __post_init__(self) -> None:
         if self.replication_factor < 1:
@@ -78,6 +85,12 @@ class Settings:
             raise ValueError(
                 f"blob_catchup_budget must be >= 1, got {self.blob_catchup_budget}"
             )
+        if self.grace_ttl_seconds <= 0:
+            raise ValueError(
+                f"grace_ttl_seconds must be > 0, got {self.grace_ttl_seconds}"
+            )
+        if self.gc_budget < 1:
+            raise ValueError(f"gc_budget must be >= 1, got {self.gc_budget}")
         if self.write_quorum > self.replication_factor:
             raise ValueError(
                 f"write_quorum ({self.write_quorum}) cannot exceed "
@@ -146,4 +159,8 @@ class Settings:
                     "ALMACEN_BLOB_CATCHUP_BUDGET", DEFAULT_BLOB_CATCHUP_BUDGET
                 )
             ),
+            grace_ttl_seconds=float(
+                os.environ.get("ALMACEN_GRACE_TTL_SECONDS", DEFAULT_GRACE_TTL_SECONDS)
+            ),
+            gc_budget=int(os.environ.get("ALMACEN_GC_BUDGET", DEFAULT_GC_BUDGET)),
         )

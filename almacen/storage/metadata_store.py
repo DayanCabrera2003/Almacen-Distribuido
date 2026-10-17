@@ -162,6 +162,40 @@ class MetadataStore:
             rows = self._conn.execute(f"SELECT {_COLUMNS} FROM files").fetchall()
             return [self._row_to_record(row) for row in rows]
 
+    def purge(self, file_id: uuid.UUID) -> bool:
+        """Delete a record and its tag occurrences outright.
+
+        The one irreversible operation in this store. A purged record is
+        indistinguishable from one this node never saw, so a peer that still
+        holds it live will teach it back on the next anti-entropy round — as a
+        *live* file, undoing the deletion. The caller must have checked the
+        grace TTL first; see `almacen.cluster.gc.records_to_purge`.
+        """
+        with self._lock, self._conn:
+            for table in ("file_tag_adds", "file_tag_removes"):
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE file_id = ?", (str(file_id),)
+                )
+            cursor = self._conn.execute(
+                "DELETE FROM files WHERE file_id = ?", (str(file_id),)
+            )
+            return cursor.rowcount > 0
+
+    def reference_counts(self) -> dict[str, int]:
+        """How many records point at each content hash.
+
+        Counts tombstoned records too: they still reference their content until
+        they are purged, which is what makes a blob's retention two grace TTLs
+        rather than one (spec §10).
+        """
+        with self._lock:
+            return {
+                content_hash: count
+                for content_hash, count in self._conn.execute(
+                    "SELECT content_hash, COUNT(*) FROM files GROUP BY content_hash"
+                ).fetchall()
+            }
+
     def close(self) -> None:
         """Release the SQLite connection.
 

@@ -46,3 +46,36 @@ def test_exists_reflects_stored_content(blob_store: BlobStore):
 
     assert blob_store.exists(content_hash) is True
     assert blob_store.exists("0" * 64) is False
+
+
+def test_list_hashes_returns_every_stored_blob(blob_store: BlobStore):
+    first = blob_store.put(b"one")
+    second = blob_store.put(b"two")
+
+    assert blob_store.list_hashes() == {first, second}
+
+
+def test_list_hashes_ignores_in_flight_temporary_files(
+    blob_store: BlobStore, tmp_path: Path
+):
+    stored = blob_store.put(b"real")
+    # What a crash in the middle of `put` leaves behind.
+    (tmp_path / "blobs" / ".tmp-abc123").write_bytes(b"partial")
+
+    assert blob_store.list_hashes() == {stored}
+
+
+def test_delete_removes_a_blob_and_reports_it(blob_store: BlobStore):
+    content_hash = blob_store.put(b"doomed")
+
+    assert blob_store.delete(content_hash) is True
+    assert blob_store.exists(content_hash) is False
+    assert blob_store.get(content_hash) is None
+
+
+def test_delete_is_idempotent(blob_store: BlobStore):
+    content_hash = blob_store.put(b"doomed")
+    blob_store.delete(content_hash)
+
+    assert blob_store.delete(content_hash) is False
+    assert blob_store.delete("0" * 64) is False

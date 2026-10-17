@@ -124,3 +124,26 @@ def test_rejects_non_positive_gossip_parameters():
             Settings(
                 data_dir=Path("/tmp/b"), db_path=Path("/tmp/m.db"), **{field: value}
             )
+
+
+def test_gc_settings_have_defaults_and_read_the_environment(monkeypatch):
+    defaults = Settings(data_dir=Path("/tmp/b"), db_path=Path("/tmp/m.db"))
+    # Asserted as a literal on purpose. The grace TTL is the margin that stops a
+    # partitioned node resurrecting a deleted file; a default quietly shortened
+    # to suit a demo would ship that bug to every real deployment.
+    assert defaults.grace_ttl_seconds == 24 * 60 * 60
+    assert defaults.gc_budget == 32
+
+    monkeypatch.setenv("ALMACEN_GRACE_TTL_SECONDS", "20")
+    monkeypatch.setenv("ALMACEN_GC_BUDGET", "5")
+    from_env = Settings.from_env()
+    assert from_env.grace_ttl_seconds == 20.0
+    assert from_env.gc_budget == 5
+
+
+def test_rejects_non_positive_gc_parameters():
+    for field, value in (("grace_ttl_seconds", 0), ("gc_budget", 0)):
+        with pytest.raises(ValueError, match=field):
+            Settings(
+                data_dir=Path("/tmp/b"), db_path=Path("/tmp/m.db"), **{field: value}
+            )

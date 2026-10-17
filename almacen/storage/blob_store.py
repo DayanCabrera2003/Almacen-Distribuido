@@ -32,5 +32,25 @@ class BlobStore:
     def exists(self, content_hash: str) -> bool:
         return self._path_for(content_hash).exists()
 
+    def list_hashes(self) -> set[str]:
+        """Every blob held locally.
+
+        Skips the `.tmp-*` files `put` uses for its atomic write: treating one
+        as a blob would mean reference-counting a name that is not a hash.
+        """
+        return {
+            path.name
+            for path in self._root.iterdir()
+            if path.is_file() and not path.name.startswith(".tmp-")
+        }
+
+    def delete(self, content_hash: str) -> bool:
+        """Remove a blob. Returns whether it was there; safe to repeat."""
+        path = self._path_for(content_hash)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
     def _path_for(self, content_hash: str) -> Path:
         return self._root / content_hash
