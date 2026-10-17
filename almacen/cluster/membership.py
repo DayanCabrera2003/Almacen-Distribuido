@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import IntEnum
 
+import structlog
+
 
 class NodeState(IntEnum):
     """Ordered worst-last, so comparing `(incarnation, state)` prefers the more
@@ -53,6 +55,15 @@ class Membership:
         # Never held across a network or store call, so it cannot deadlock
         # against the metadata store's lock.
         self._lock = threading.RLock()
+        # Peers whose suspicion has been seen to expire. SUSPECT -> DEAD is
+        # computed on read rather than stored, so without this every read past
+        # the deadline would log the death again. Cleared whenever the peer's
+        # entry is replaced, so a later death is logged in its turn.
+        self._declared_dead: set[str] = set()
+        # A lazy proxy rather than `logger.bind(...)`: a bound logger freezes
+        # the processors configured at bind time, and this object can outlive
+        # a reconfiguration (or a test's `capture_logs`).
+        self._log = structlog.get_logger(__name__, node_id=node_id)
 
     # ---- direct observation ----
 
@@ -64,7 +75,12 @@ class Membership:
                 # A fresh incarnation, so this good news outranks the bad news
                 # that may still be circulating about this peer.
                 incarnation = 0 if current is None else current.incarnation + 1
-                self._view[peer] = NodeStatus(NodeState.ALIVE, incarnation, now)
+                self._replace(
+                    peer,
+                    NodeStatus(NodeState.ALIVE, incarnation, now),
+                    now,
+                    reason="probe_succeeded",
+                )
 
     def record_unreachable(self, peer: str, now: datetime) -> None:
         """A probe failed: suspect the peer, but do not declare it dead.
@@ -75,13 +91,18 @@ class Membership:
         with self._lock:
             current = self._view.get(peer)
             if current is None:
-                self._view[peer] = NodeStatus(NodeState.SUSPECT, 0, now)
+                self._replace(
+                    peer, NodeStatus(NodeState.SUSPECT, 0, now), now, "probe_failed"
+                )
             elif current.state is NodeState.ALIVE:
                 # Only the first failure starts the clock; later ones must not
                 # keep pushing the deadline back, or a peer failing every probe
                 # would never be declared dead.
-                self._view[peer] = NodeStatus(
-                    NodeState.SUSPECT, current.incarnation, now
+                self._replace(
+                    peer,
+                    NodeStatus(NodeState.SUSPECT, current.incarnation, now),
+                    now,
+                    reason="probe_failed",
                 )
 
     def state_of(self, peer: str, now: datetime) -> NodeState:
@@ -96,6 +117,14 @@ class Membership:
                 current.state is NodeState.SUSPECT
                 and now - current.since >= self._suspicion_timeout
             ):
+                if peer not in self._declared_dead:
+                    self._declared_dead.add(peer)
+                    self._log_transition(
+                        peer,
+                        NodeState.SUSPECT,
+                        NodeStatus(NodeState.DEAD, current.incarnation, now),
+                        "suspicion_timeout",
+                    )
                 return NodeState.DEAD
             return current.state
 
@@ -142,8 +171,11 @@ class Membership:
                     # machine's timestamp makes the suspicion deadline depend on
                     # that machine's clock: a peer running ahead yields entries
                     # that never age into DEAD, one behind yields instant DEAD.
-                    self._view[peer] = NodeStatus(
-                        theirs.state, theirs.incarnation, now
+                    self._replace(
+                        peer,
+                        NodeStatus(theirs.state, theirs.incarnation, now),
+                        now,
+                        reason="gossip",
                     )
 
     def _refute(self, claim: NodeStatus) -> None:
@@ -155,3 +187,41 @@ class Membership:
         """
         if claim.state is not NodeState.ALIVE:
             self._incarnation = max(self._incarnation, claim.incarnation) + 1
+            self._log.warning(
+                "member_refuted_suspicion",
+                claimed_state=claim.state.name.lower(),
+                incarnation=self._incarnation,
+            )
+
+    def _replace(
+        self, peer: str, status: NodeStatus, now: datetime, reason: str
+    ) -> None:
+        """Store a new entry for `peer`, logging if its visible state changed.
+
+        The "before" state is the effective one from `state_of`, not the stored
+        one, so a suspect whose timeout has passed recovers *from dead*. Caller
+        holds the lock.
+        """
+        before = self.state_of(peer, now) if peer in self._view else None
+        self._view[peer] = status
+        self._declared_dead.discard(peer)
+        if before is not status.state:
+            self._log_transition(peer, before, status, reason)
+
+    def _log_transition(
+        self,
+        peer: str,
+        before: NodeState | None,
+        after: NodeStatus,
+        reason: str,
+    ) -> None:
+        # Logged under the lock, which is acceptable only because a log call
+        # is short and never re-enters this class.
+        self._log.info(
+            "member_state_changed",
+            peer=peer,
+            from_state="unknown" if before is None else before.name.lower(),
+            to_state=after.state.name.lower(),
+            incarnation=after.incarnation,
+            reason=reason,
+        )
