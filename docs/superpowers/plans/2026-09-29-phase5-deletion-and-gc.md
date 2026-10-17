@@ -63,7 +63,7 @@ tests/
   integration/storage/test_gc_state.py     # NEW
   integration/cluster/test_gc.py           # NEW: the collector
   integration/cluster/test_no_resurrection.py  # NEW: the headline guard
-docker/docker-compose.yml       # MODIFY: short TTL for the demo
+docs/deployment.md              # MODIFY: short TTL for the demo
 DAA/grace-ttl-and-resurrection.md   # NEW (untracked)
 DAA/blob-reference-counting.md      # NEW (untracked)
 ```
@@ -315,12 +315,13 @@ not keep.
 
 ### Task 7: Demo and documentation
 
-**Files:** Modify `docker/docker-compose.yml`, `README.md`
+**Files:** Modify `docs/deployment.md`, `README.md`
 
-- [ ] **Step 1: Short TTL in Compose** — `ALMACEN_GRACE_TTL_SECONDS: "20"`, so a
-delete, a purge and a blob collection are all observable in a demo session.
-State in the file that this is a demo value and that 24h is the default for a
-reason.
+- [ ] **Step 1: Short TTL in the demo deployment** — add
+`-e ALMACEN_GRACE_TTL_SECONDS=20` to the `docker run` commands in
+`docs/deployment.md` and the README, so a delete, a purge and a blob collection
+are all observable in a demo session. State there that this is a demo value and
+that 24h is the default for a reason.
 
 - [ ] **Step 2: Verify by hand** — upload, delete, confirm the blob is still on
 disk, wait past two TTLs, confirm the record and then the blob are gone.
