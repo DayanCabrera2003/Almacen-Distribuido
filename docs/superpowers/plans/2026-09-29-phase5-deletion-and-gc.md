@@ -267,7 +267,7 @@ calling merge directly, because the hazard lives in the interaction:
 
 **Files:** Modify `almacen/cluster/gossip.py`, `almacen/main.py`
 
-- [ ] **Step 1: Add a `collect` step to `GossipLoop.run_once`**, after blob
+- [x] **Step 1: Add a `collect` step to `GossipLoop.run_once`**, after blob
 catch-up, with the same budget-and-stop-check treatment and the same
 `except Exception` backstop — nothing may escape the thread.
 
@@ -275,14 +275,14 @@ Order matters: catch-up first, then collect. Running collect first would let a
 node delete a blob in the same tick it was about to fetch a record that
 references it.
 
-- [ ] **Step 2: Construct the collector in `create_app`** and give the loop the
+- [x] **Step 2: Construct the collector in `create_app`** and give the loop the
 `BlobGCState`. GC must be disabled along with gossip when
 `gossip_interval_seconds <= 0`, so the existing fixtures are unaffected.
 
-- [ ] **Step 3: Run the whole suite** — nothing should change, since the default
+- [x] **Step 3: Run the whole suite** — nothing should change, since the default
 TTL is 24 hours and no test runs that long.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ---
 

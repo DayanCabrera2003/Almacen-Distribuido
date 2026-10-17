@@ -14,6 +14,7 @@ from almacen.config import Peer, Settings
 from almacen.domain.file_record import FileRecord
 from almacen.rpc.server import build_server
 from almacen.storage.blob_store import BlobStore
+from almacen.storage.gc_state import BlobGCState
 from almacen.storage.metadata_store import MetadataStore
 from tests.helpers import free_port
 
@@ -53,6 +54,7 @@ def cluster(tmp_path: Path):
             "server": server,
             "settings": settings,
             "client": ReplicationClient(settings, blob_store, channels),
+            "gc_state": BlobGCState(tmp_path / node_id / "gc_state.db"),
         }
 
     yield nodes, peers, channels
@@ -60,6 +62,7 @@ def cluster(tmp_path: Path):
     channels.close()
     for node in nodes.values():
         node["server"].stop(0).wait()
+        node["gc_state"].close()
 
 
 def make_loop(node, peers, channels, targets, now=NOW) -> GossipLoop:
@@ -69,6 +72,7 @@ def make_loop(node, peers, channels, targets, now=NOW) -> GossipLoop:
         settings=node["settings"],
         store=node["store"],
         blob_store=node["blob_store"],
+        gc_state=node["gc_state"],
         membership=node["membership"],
         channels=channels,
         replication_client=node["client"],
@@ -188,3 +192,80 @@ def test_a_deterministic_schedule_converges_three_nodes(cluster):
     expected = {"base", "t0", "t1", "t2"}
     for node_id in NODES:
         assert nodes[node_id]["store"].get(base.file_id).tags == expected, node_id
+
+
+def test_one_tick_collects_garbage_past_the_grace_ttl(cluster):
+    nodes, peers, channels = cluster
+    node = nodes["node1"]
+    record = FileRecord.new(name="a.txt", content_hash="h", node_id="node1")
+    node["store"].insert(record)
+    deleted = node["store"].mutate(record.file_id, lambda r: r.mark_deleted("node1"))
+    grace = timedelta(seconds=node["settings"].grace_ttl_seconds)
+
+    loop = make_loop(node, peers, channels, set(), now=deleted.tombstone_at + grace)
+    loop.run_once()
+
+    assert node["store"].get(record.file_id) is None
+
+
+def test_blob_catch_up_runs_before_collection(cluster, monkeypatch):
+    # The other order would let a node delete a blob in the same tick it was
+    # about to fetch a record that references it.
+    from almacen.cluster import gossip as gossip_module
+
+    nodes, peers, channels = cluster
+    order = []
+    monkeypatch.setattr(
+        gossip_module, "catch_up_blobs", lambda **_: order.append("catch_up")
+    )
+    monkeypatch.setattr(gossip_module, "collect", lambda **_: order.append("collect"))
+
+    make_loop(nodes["node1"], peers, channels, {"node2"}).run_once()
+
+    assert order == ["catch_up", "collect"]
+
+
+def test_collection_is_budgeted_and_stoppable(cluster, monkeypatch):
+    from almacen.cluster import gossip as gossip_module
+
+    nodes, peers, channels = cluster
+    seen = {}
+    monkeypatch.setattr(gossip_module, "collect", lambda **kwargs: seen.update(kwargs))
+
+    loop = make_loop(nodes["node1"], peers, channels, set())
+    loop.run_once()
+
+    settings = nodes["node1"]["settings"]
+    assert seen["budget"] == settings.gc_budget
+    assert seen["grace"] == timedelta(seconds=settings.grace_ttl_seconds)
+    assert seen["now"] == NOW
+    assert seen["should_stop"]() is False
+    loop.stop(timeout=1.0)
+    assert seen["should_stop"]() is True
+
+
+def test_a_stopped_loop_does_not_collect(cluster, monkeypatch):
+    from almacen.cluster import gossip as gossip_module
+
+    nodes, peers, channels = cluster
+    calls = []
+    monkeypatch.setattr(gossip_module, "collect", lambda **_: calls.append(1))
+
+    loop = make_loop(nodes["node1"], peers, channels, set())
+    loop.stop(timeout=1.0)
+    loop.run_once()
+
+    assert calls == []
+
+
+def test_an_unexpected_gc_failure_does_not_escape_the_tick(cluster, monkeypatch):
+    from almacen.cluster import gossip as gossip_module
+
+    nodes, peers, channels = cluster
+
+    def broken(**_):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(gossip_module, "collect", broken)
+
+    make_loop(nodes["node1"], peers, channels, {"node2"}).run_once()

@@ -7,11 +7,12 @@ import random
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import grpc
 
 from almacen.cluster.channels import ChannelPool
+from almacen.cluster.gc import collect
 from almacen.cluster.membership import Membership
 from almacen.cluster.placement import replica_set
 from almacen.cluster.reconciliation import build_digest
@@ -26,6 +27,7 @@ from almacen.rpc.gossip_codec import (
 )
 from almacen.rpc.record_codec import message_to_record, record_to_message
 from almacen.storage.blob_store import BlobStore
+from almacen.storage.gc_state import BlobGCState
 from almacen.storage.metadata_store import MetadataStore
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,7 @@ class GossipLoop:
         settings: Settings,
         store: MetadataStore,
         blob_store: BlobStore,
+        gc_state: BlobGCState,
         membership: Membership,
         channels: ChannelPool,
         replication_client: ReplicationClient,
@@ -153,6 +156,7 @@ class GossipLoop:
         self._settings = settings
         self._store = store
         self._blob_store = blob_store
+        self._gc_state = gc_state
         self._membership = membership
         self._channels = channels
         self._replication_client = replication_client
@@ -172,7 +176,12 @@ class GossipLoop:
         return random.sample(candidates, min(self._settings.gossip_fanout, len(candidates)))
 
     def run_once(self) -> None:
-        """One tick: gossip with the chosen peers, then catch up on blobs."""
+        """One tick: gossip with the chosen peers, catch up on blobs, collect.
+
+        Catch-up runs before collection on purpose: the other order would let
+        a node delete a blob in the same tick it was about to fetch a record
+        that references it.
+        """
         now = self._now()
         for peer in self._choose_peers(now):
             if self._stop.is_set():
@@ -207,6 +216,21 @@ class GossipLoop:
             )
         except Exception:  # noqa: BLE001
             logger.exception("unexpected failure catching up blobs")
+
+        if self._stop.is_set():
+            return
+        try:
+            collect(
+                store=self._store,
+                blob_store=self._blob_store,
+                gc_state=self._gc_state,
+                now=now,
+                grace=timedelta(seconds=self._settings.grace_ttl_seconds),
+                budget=self._settings.gc_budget,
+                should_stop=self._stop.is_set,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("unexpected failure collecting garbage")
 
     def start(self) -> None:
         if self._thread is not None:

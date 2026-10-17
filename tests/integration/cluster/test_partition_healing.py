@@ -23,6 +23,7 @@ from almacen.config import Peer, Settings
 from almacen.domain.file_record import FileRecord
 from almacen.rpc.server import build_server
 from almacen.storage.blob_store import BlobStore
+from almacen.storage.gc_state import BlobGCState
 from almacen.storage.metadata_store import MetadataStore
 from tests.helpers import free_port
 
@@ -37,6 +38,7 @@ class Node:
         self.port = port
         self.blob_store = BlobStore(tmp_path / node_id / "blobs")
         self.store = MetadataStore(tmp_path / node_id / "metadata.db")
+        self.gc_state = BlobGCState(tmp_path / node_id / "gc_state.db")
         self.membership = Membership(node_id, NODES, SUSPICION)
         self.settings = Settings(
             data_dir=tmp_path / node_id / "blobs",
@@ -80,6 +82,7 @@ class Node:
             settings=self.settings,
             store=self.store,
             blob_store=self.blob_store,
+            gc_state=self.gc_state,
             membership=self.membership,
             channels=self._channels,
             replication_client=self.client,
@@ -100,6 +103,7 @@ def cluster(tmp_path: Path):
     channels.close()
     for node in nodes.values():
         node.stop()
+        node.gc_state.close()
 
 
 def full_round(nodes, now=NOW) -> None:

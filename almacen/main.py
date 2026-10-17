@@ -20,6 +20,7 @@ from almacen.cluster.replication_client import ReplicationClient
 from almacen.config import Settings
 from almacen.rpc.server import build_server
 from almacen.storage.blob_store import BlobStore
+from almacen.storage.gc_state import BlobGCState
 from almacen.storage.metadata_store import MetadataStore
 from almacen.storage.tag_index import TagIndex
 
@@ -71,6 +72,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # owner rather than by either of them.
         app.state.channels.close()
         app.state.local_metadata_store.close()
+        if app.state.gc_state is not None:
+            app.state.gc_state.close()
         logger.info("node %s stopped", settings.node_id)
 
 
@@ -104,18 +107,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.membership = membership
     # Disabled by a non-positive interval. That is what keeps the test suite's
     # multi-node fixtures from starting real gossip threads on a real clock.
-    app.state.gossip_loop = (
-        GossipLoop(
+    # Garbage collection runs on the same loop, so it is disabled with it.
+    app.state.gc_state = None
+    app.state.gossip_loop = None
+    if settings.gossip_enabled:
+        # A file of its own beside the metadata, independent of its schema.
+        app.state.gc_state = BlobGCState(settings.db_path.with_name("gc_state.db"))
+        app.state.gossip_loop = GossipLoop(
             settings=settings,
             store=local_metadata_store,
             blob_store=blob_store,
+            gc_state=app.state.gc_state,
             membership=membership,
             channels=channels,
             replication_client=app.state.replication_client,
         )
-        if settings.gossip_enabled
-        else None
-    )
 
     app.include_router(files_router.router)
     app.include_router(tags_router.router)
