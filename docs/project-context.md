@@ -49,7 +49,9 @@ conclusions without re-arguing them.
   up as a real design, even though scope is scaled to one developer.
 - **Team size**: solo developer.
 - **Language/stack**: Python.
-- **Deployment/demo environment**: Docker Compose — each node is a container;
+- **Deployment/demo environment**: Docker — each node is a container started
+  by hand with `docker run` (the course forbids docker-compose; see
+  `docs/deployment.md`);
   cluster simulated locally, with network partitions injectable (e.g. via
   `tc`/`iptables` or a proxy like toxiproxy) between containers.
 

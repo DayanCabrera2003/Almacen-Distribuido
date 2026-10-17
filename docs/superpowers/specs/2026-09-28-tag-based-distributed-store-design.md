@@ -17,7 +17,9 @@ Full original assignment brief: see `docs/project-context.md`.
 
 - Solo developer, portfolio-grade quality (not a minimal course demo).
 - Language: Python.
-- Demo/deployment environment: Docker Compose, each node as a container, with
+- Demo/deployment environment: Docker, each node as a container started by hand
+  with `docker run` on a user-defined network (no orchestration file, per the
+  course rules; see `docs/deployment.md`), with
   network partitions injectable between containers (`docker network disconnect`
   or a proxy such as toxiproxy).
 - Target demo scale: N=5 nodes, replication factor R=3 for content, write quorum
@@ -262,7 +264,7 @@ node:
   than under-retention — not an oversight.
 
 **TTL in the demo:** the grace TTL is a `config.py` setting, not hardcoded. The
-default (24h) is the production-realistic value; the Docker Compose demo
+default (24h) is the production-realistic value; the demo deployment
 overrides it to a short duration (e.g. minutes) so tombstone purge, blob GC, and
 post-partition reconciliation are all observable within a live demo session.
 
@@ -319,7 +321,7 @@ service Replication {
 | Blobs | flat filesystem | simple, sufficient for this scope |
 | CLI | Typer | operate the cluster/demo without curl |
 | Tests | pytest + pytest-asyncio | standard |
-| Packaging | Docker + docker-compose | reproducible local cluster |
+| Packaging | Docker (one image, `docker run` per node) | reproducible local cluster; every deployment decision is an explicit command |
 | Chaos/partitions | `docker network disconnect` / toxiproxy | inject partitions to demonstrate reconciliation |
 | Observability | structlog + `/cluster/status` | trace what each node is doing during the demo |
 
@@ -360,11 +362,10 @@ almacen/
   main.py                      # bootstrap: starts FastAPI + gRPC + gossip loop
 docker/
   Dockerfile
-  docker-compose.yml            # N nodes + simulated network
 tests/
   unit/                         # crdt, placement, domain — no I/O
   integration/                  # real storage (temp sqlite/fs)
-  cluster/                      # multi-node via docker-compose, incl. chaos
+  cluster/                      # multi-node in-process clusters, incl. chaos
 DAA/                             # algorithm design/analysis write-ups (untracked)
 docs/
   project-context.md
@@ -401,12 +402,12 @@ Each phase is independently demoable and gets its own plan later (via
    full REST API against one node, no networking.
 2. **Cluster without failures** — gRPC replication, static membership (fixed
    peer list, no gossip yet), HRW placement, happy-path W/R replication, N-node
-   Docker Compose.
+   Docker deployment by hand (`docker run`).
 3. **CRDTs and concurrency** — `or_set.py`, `lww_register.py`,
    `vector_clock.py` integrated into `FileRecord`; dedicated tests proving
    concurrent writes from different nodes converge correctly.
 4. **Gossip, partitions, reconciliation** — dynamic SWIM-style membership,
-   push-pull anti-entropy, partition injection in Compose, demo of
+   push-pull anti-entropy, partition injection via `docker network disconnect`, demo of
    post-partition reconciliation.
 5. **Deletion and GC** — tombstones, grace TTL, reference counting, orphaned
    blob purge (covering both tombstone-purge orphans and `PATCH`-repoint
