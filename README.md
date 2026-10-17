@@ -1,15 +1,17 @@
 # Almacén Distribuido de Archivos Basado en Etiquetas
 
-Tag-based distributed file store. See
+Tag-based distributed file store. See [docs/architecture.md](docs/architecture.md)
+for the system as built, the design spec
 `docs/superpowers/specs/2026-09-28-tag-based-distributed-store-design.md` for the
-full architecture, and `docs/project-context.md` for the original assignment
+decisions behind it, and `docs/project-context.md` for the original assignment
 brief.
 
 ## Status
 
-Phase 5 (deletion and garbage collection) — deleted files and orphaned content
-are now reclaimed, without letting a node returning from a partition undo a
-delete.
+Phases 1-5 are complete, and Phase 6 (polish) is under way: deleted files and
+orphaned content are reclaimed without letting a node returning from a
+partition undo a delete, and each node reports its view of the cluster and logs
+structured events.
 
 Content is stored on R=3 of N=5 nodes chosen by rendezvous hashing, acknowledged
 after W=2 replicas confirm. Metadata is replicated in full to every node, so any
@@ -63,7 +65,7 @@ Still missing: OR-Set remove entries for tags are never pruned (safe pruning
 needs every node to have observed the removal, which this design does not
 track). Of Phase 6, `GET /cluster/status` and structured logging (see
 [Observability](#observability)) and the [command-line
-client](#command-line-client) are in place.
+client](#command-line-client) are in place; the chaos tests are not yet.
 
 ### Upgrading from Phase 2
 
@@ -265,6 +267,8 @@ The events worth filtering on:
 | `blob_caught_up` | info | `content_hash` | Anti-entropy fetched a blob this node is a replica for |
 | `tombstone_purged` / `blob_collected` | info | `file_id` / `content_hash` | GC removed a record past the grace TTL, or an orphaned blob |
 | `gc_round_completed` | info | `purged`, `blobs_deleted` | A GC round removed something (idle rounds stay silent) |
+| `blob_local_copy_corrupt` | error | `content_hash` | A local blob failed its hash check on read; another replica is tried |
+| `gossip_round_crashed` / `blob_catchup_crashed` / `gc_round_crashed` | error | traceback | An unexpected exception in one step of a gossip tick; the loop carries on |
 
 `error` is the gRPC status code (`UNAVAILABLE`, `DEADLINE_EXCEEDED`) when there
 is one. Uvicorn's own lines go through the same renderer, so the stream stays
@@ -366,7 +370,8 @@ shows the answering node's own view of the cluster; a node without the
 
 - [docs/architecture.md](docs/architecture.md) — the system end to end: node
   anatomy, data model, placement, read/write paths, CRDT convergence,
-  membership, anti-entropy, deletion and GC, and what is and is not guaranteed.
+  membership, anti-entropy, deletion and GC, observability, the command-line
+  client, and what is and is not guaranteed.
 - [docs/comparison.md](docs/comparison.md) — comparison with CephFS, IPFS and
   semantic/tag-based file systems, as requested by the assignment.
 - [docs/deployment.md](docs/deployment.md) — deploying a cluster by hand with
