@@ -34,6 +34,10 @@ from almacen.storage.metadata_store import MetadataStore
 
 logger = structlog.get_logger(__name__)
 
+# A dead peer is probed with a cheap Ping on the gossip thread, so its timeout
+# bounds how long one tick can stall on a peer that is really gone.
+PROBE_TIMEOUT_SECONDS = 1.0
+
 
 def gossip_once(
     peer: Peer,
@@ -196,6 +200,30 @@ class GossipLoop:
             return []
         return random.sample(candidates, min(self._settings.gossip_fanout, len(candidates)))
 
+    def _probe_a_dead_peer(self, now: datetime) -> None:
+        """Ping one peer believed dead; revive it if it answers.
+
+        Gossip only goes to live peers, and a dead peer is revived only by
+        hearing from it. After a partition longer than the suspicion timeout
+        both sides hold each other dead, so without a probe reaching across
+        neither would ever learn the network is back. One peer per tick, with a
+        short timeout, so a peer that really is gone costs little.
+        """
+        live = set(self._membership.live_peers(now))
+        dead = [p for p in self._settings.remote_peers if p.node_id not in live]
+        if not dead:
+            return
+        peer = random.choice(dead)
+        try:
+            stub = pb_grpc.ClusterStub(self._channels.channel(peer.address))
+            stub.Ping(
+                pb.PingRequest(from_node_id=self._settings.node_id),
+                timeout=min(self._settings.rpc_timeout_seconds, PROBE_TIMEOUT_SECONDS),
+            )
+        except grpc.RpcError:
+            return
+        self._membership.record_reachable(peer.node_id, now)
+
     def run_once(self) -> None:
         """One tick: gossip with the chosen peers, catch up on blobs, collect.
 
@@ -204,6 +232,7 @@ class GossipLoop:
         that references it.
         """
         now = self._now()
+        self._probe_a_dead_peer(now)
         for peer in self._choose_peers(now):
             if self._stop.is_set():
                 # Re-checked between peers so a shutdown during a fanout does

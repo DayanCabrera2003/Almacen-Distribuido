@@ -269,3 +269,62 @@ def test_an_unexpected_gc_failure_does_not_escape_the_tick(cluster, monkeypatch)
     monkeypatch.setattr(gossip_module, "collect", broken)
 
     make_loop(nodes["node1"], peers, channels, {"node2"}).run_once()
+
+
+def default_loop(node, channels, now) -> GossipLoop:
+    """A loop with the production peer choice, which is what heals after a split."""
+    return GossipLoop(
+        settings=node["settings"],
+        store=node["store"],
+        blob_store=node["blob_store"],
+        gc_state=node["gc_state"],
+        membership=node["membership"],
+        channels=channels,
+        replication_client=node["client"],
+        now=lambda: now,
+    )
+
+
+def test_a_tick_probes_a_dead_peer_so_a_long_partition_heals(cluster):
+    # After a partition longer than the suspicion timeout, each side holds the
+    # other dead and gossips only with live peers. Unless something reaches
+    # across, neither side ever learns the network is back.
+    nodes, peers, channels = cluster
+    membership = nodes["node1"]["membership"]
+    for peer in ("node2", "node3"):
+        membership.record_unreachable(peer, NOW)
+    later = NOW + timedelta(seconds=10)
+    assert membership.live_peers(later) == ()
+
+    default_loop(nodes["node1"], channels, later).run_once()
+
+    revived = [p for p in ("node2", "node3") if membership.state_of(p, later) is NodeState.ALIVE]
+    assert len(revived) == 1, "one dead peer is probed per tick"
+
+
+def test_a_dead_peer_that_is_still_down_stays_dead(cluster):
+    nodes, peers, channels = cluster
+    membership = nodes["node1"]["membership"]
+    membership.record_unreachable("node2", NOW)
+    membership.record_reachable("node3", NOW)
+    nodes["node2"]["server"].stop(0).wait()
+    later = NOW + timedelta(seconds=10)
+
+    default_loop(nodes["node1"], channels, later).run_once()
+
+    assert membership.state_of("node2", later) is NodeState.DEAD
+
+
+def test_being_probed_tells_the_probed_node_the_prober_is_alive(cluster):
+    # The probed side may hold the prober dead too; the probe is proof of life.
+    nodes, peers, channels = cluster
+    for node_id, other in (("node1", "node2"), ("node2", "node1")):
+        nodes[node_id]["membership"].record_unreachable(other, NOW)
+    nodes["node1"]["membership"].record_reachable("node3", NOW)
+    nodes["node2"]["membership"].record_reachable("node3", NOW)
+    later = NOW + timedelta(seconds=10)
+
+    default_loop(nodes["node1"], channels, later).run_once()
+
+    assert nodes["node1"]["membership"].state_of("node2", later) is NodeState.ALIVE
+    assert nodes["node2"]["membership"].state_of("node1", later) is NodeState.ALIVE

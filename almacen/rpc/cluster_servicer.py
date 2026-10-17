@@ -85,6 +85,11 @@ class ClusterServicer(pb_grpc.ClusterServicer):
     def Ping(
         self, request: pb.PingRequest, context: grpc.ServicerContext
     ) -> pb.PingResponse:
+        # Being probed is proof the prober is up. It may hold this node dead
+        # after a long partition and be probing to find out; reviving it here
+        # lets both sides resume gossip from the same exchange.
+        if self._membership is not None and request.from_node_id:
+            self._membership.record_reachable(request.from_node_id, _utcnow())
         return pb.PingResponse(node_id=self._node_id)
 
     def Gossip(
