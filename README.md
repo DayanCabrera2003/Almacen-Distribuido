@@ -44,6 +44,17 @@ for but does not hold, so content catches up along with metadata.
 The practical effect: a write made while a node is unreachable reaches it once
 the partition heals, rather than being lost forever.
 
+Content and metadata therefore have different guarantees. An acknowledged
+upload is on disk (flushed with `fsync`) on at least two replicas; an
+acknowledged metadata write is flushed to the accepting node's disk and pushed
+to every reachable peer, with no quorum. Because content is always written to
+quorum before its record, metadata never points at content that was not stored
+durably; while the two are out of step on a node, a client may see an older
+version of a file, a `404` for one not yet known there, or a `503` for one whose
+bytes are gone — never wrong bytes. [Consistency and durability: content vs
+metadata](docs/architecture.md#13-consistency-and-durability-content-vs-metadata)
+defines both and lists every divergence case with the test that covers it.
+
 Deletion is two-staged. A `DELETE` tombstones the record, which gossip spreads
 like any other update; once the tombstone is older than the **grace TTL**
 (counted from when the delete was issued) each node purges the record. A blob
@@ -402,8 +413,9 @@ shows the answering node's own view of the cluster; a node without the
 
 - [docs/architecture.md](docs/architecture.md) — the system end to end: node
   anatomy, data model, placement, read/write paths, CRDT convergence,
-  membership, anti-entropy, deletion and GC, observability, the command-line
-  client, and what is and is not guaranteed.
+  membership, anti-entropy, deletion and GC, consistency and durability of
+  content vs metadata, observability, the command-line client, and what is and
+  is not guaranteed.
 - [docs/comparison.md](docs/comparison.md) — comparison with CephFS, IPFS and
   semantic/tag-based file systems, as requested by the assignment.
 - [docs/deployment.md](docs/deployment.md) — deploying a cluster by hand with
