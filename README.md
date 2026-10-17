@@ -212,6 +212,35 @@ raise the `protobuf` floor in `pyproject.toml` to match.
 
     pytest -v
 
+### Chaos tests
+
+`tests/chaos/` drives an in-process five-node cluster — the real application,
+its gRPC servers and its on-disk stores — through randomized fault schedules:
+arbitrary splits, isolated nodes, one-way link cuts, and crashes followed by
+restarts on the same storage, while uploads, `PATCH`es, tag edits, deletes and
+downloads are issued at random nodes. It needs no Docker and never sleeps:
+simulated time drives every timestamp, grace TTL and gossip tick, and a cut
+link fails instantly instead of timing out.
+
+Checked at every step: every response matches what the receiving node could
+know (an upload succeeds exactly when W replicas are reachable, an edit is a
+`404` exactly when the node holds no live record, ...), no node serves a file
+again once it has held it as deleted, and no blob referenced by a live record on
+any node is collected. After healing: identical metadata on every node,
+consistent with the acknowledged operations; every live file readable from
+every node with its hash verified; and, three grace TTLs later, no tombstone or
+orphaned blob left anywhere. Every partition is kept shorter than the grace TTL,
+the condition under which the design promises no resurrection.
+
+    pytest tests/chaos                      # the default seeds, 0-9
+    CHAOS_SEEDS=100-299 pytest tests/chaos  # explore more schedules
+    CHAOS_SEEDS=7 pytest tests/chaos        # reproduce one seed
+
+`CHAOS_SEEDS` takes a seed, a range or a comma-separated list. A failing run
+reports its seed, the exact command that reproduces it, and the full schedule of
+faults, operations (with their status codes) and gossip ticks that led to the
+failure. The same seed always produces the same schedule.
+
 ## API
 
 | Method   | Path                          | Description                                              |
@@ -284,6 +313,7 @@ shows the answering node's own view of the cluster; a node without the
       unit/              # crdt, domain, config, placement, codec — no I/O
       integration/       # storage, rpc, cluster, API, CLI
       cluster/           # five-node end-to-end
+      chaos/             # five nodes under random faults: harness + seeded runs
 
 ## Further reading
 

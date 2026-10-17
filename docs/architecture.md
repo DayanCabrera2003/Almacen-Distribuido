@@ -663,6 +663,13 @@ digests, which make the steady state O(log n), are deferred (spec §11, §17).
   partitioned one; reads of content as long as one replica of the blob is
   reachable.
 
+Most of these are checked together, under randomized fault schedules (splits,
+one-way link cuts, crashes and restarts, each shorter than the grace TTL), by
+the chaos suite in `tests/chaos/`: convergence, consistency with the
+acknowledged operations, integrity of every read, no resurrection, and that GC
+never collects a blob a live record references while still collecting every
+orphan. The README's Test section explains how to run it and reproduce a seed.
+
 ### Not guaranteed
 
 - **Linearizability or read-your-writes across nodes.** A client that writes to
