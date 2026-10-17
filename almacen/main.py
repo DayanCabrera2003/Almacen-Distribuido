@@ -2,11 +2,11 @@
 """FastAPI application bootstrap for a single node of the cluster."""
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
+import structlog
 from fastapi import FastAPI
 
 from almacen.api.routers import files as files_router
@@ -18,13 +18,14 @@ from almacen.cluster.metadata_replicator import MetadataReplicator
 from almacen.cluster.replicated_metadata_store import ReplicatedMetadataStore
 from almacen.cluster.replication_client import ReplicationClient
 from almacen.config import Settings
+from almacen.observability import configure_logging_from_env
 from almacen.rpc.server import build_server
 from almacen.storage.blob_store import BlobStore
 from almacen.storage.gc_state import BlobGCState
 from almacen.storage.metadata_store import MetadataStore
 from almacen.storage.tag_index import TagIndex
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 GRPC_SHUTDOWN_GRACE_SECONDS = 2.0
 
@@ -56,10 +57,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.gossip_loop.start()
 
     logger.info(
-        "node %s serving gRPC on port %s, peers: %s",
-        settings.node_id,
-        settings.grpc_port,
-        [p.node_id for p in settings.remote_peers],
+        "node_started",
+        node_id=settings.node_id,
+        grpc_port=settings.grpc_port,
+        peers=[p.node_id for p in settings.remote_peers],
+        gossip_enabled=settings.gossip_enabled,
     )
     try:
         yield
@@ -75,7 +77,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.local_metadata_store.close()
         if app.state.gc_state is not None:
             app.state.gc_state.close()
-        logger.info("node %s stopped", settings.node_id)
+        logger.info("node_stopped", node_id=settings.node_id)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -130,4 +132,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
+# Before the app is built, so every component logs through the configured
+# renderer from its first line.
+configure_logging_from_env()
 app = create_app()
