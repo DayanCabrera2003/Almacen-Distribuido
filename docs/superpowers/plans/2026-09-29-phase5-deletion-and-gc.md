@@ -227,18 +227,18 @@ deletable)` so the collector can update state and delete in one pass.
 
 **Files:** Modify `almacen/cluster/gc.py`; test `tests/integration/cluster/test_gc.py`
 
-- [ ] **Step 1: Write the failing tests.** A real store, blob store and GC state.
+- [x] **Step 1: Write the failing tests.** A real store, blob store and GC state.
 Cover: a tombstone past its TTL is purged and the record is gone; the blob it
 pointed at becomes a candidate at that moment and is *not* deleted yet; after a
 second TTL it is deleted; a `PATCH`-orphaned blob becomes a candidate
 immediately and is deleted after one TTL; a blob that regains a referrer is
 cleared and survives; the budget caps one round; a stop signal interrupts it.
 
-- [ ] **Step 2: Implement `collect()`**, applying the decisions in this order —
+- [x] **Step 2: Implement `collect()`**, applying the decisions in this order —
 purge records first, *then* recount references, so a blob orphaned by this
 round's purge becomes a candidate in the same round rather than the next one.
 
-- [ ] **Step 3: Run tests, commit**
+- [x] **Step 3: Run tests, commit**
 
 ---
 
