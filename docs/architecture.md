@@ -833,6 +833,18 @@ orphan. The README's Test section explains how to run it and reproduce a seed.
 - **Uploads during heavy failure.** No sloppy quorum and no hinted handoff: if
   two of a blob's three HRW replicas are unreachable, that upload fails with
   `503` even though other nodes are up. (Metadata operations are unaffected.)
+- **Write latency independent of a slow node.** A write waits for every
+  replica attempt and every metadata push to finish (section 7), so a node
+  that is slow but still answering — and therefore never declared dead —
+  sets the latency of every write it takes part in, which for metadata is
+  every write in the cluster. Measured on the five-node Docker deployment
+  with one node given 300 ms ± 50 ms of delay and 20% packet loss
+  (`tc netem`): every upload succeeded and every node converged, but upload
+  latency went from about 25 ms to a median of 700 ms and a 95th percentile
+  of 2.4 s, with a worst case of 4.3 s, bounded by
+  `ALMACEN_RPC_TIMEOUT_SECONDS`. Acknowledging at the W-th blob ack and
+  pushing metadata in the background would decouple the two; section 7
+  explains why the write waits instead.
 - **Durability of a metadata write against disk loss at acknowledgement.** A
   metadata write is acknowledged after the local commit, flushed to disk; the
   push to peers is best effort. If the node's disk is lost before any peer
