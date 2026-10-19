@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 import grpc
 import structlog
 
 from almacen.cluster.channels import ChannelPool
+from almacen.cluster.membership import Membership, NodeState
 from almacen.cluster.placement import replica_set
 from almacen.config import Settings
 from almacen.observability import describe_error
@@ -16,6 +18,10 @@ from almacen.rpc import replication_pb2 as pb
 from almacen.rpc import replication_pb2_grpc as pb_grpc
 from almacen.rpc.replication_servicer import CHUNK_SIZE
 from almacen.storage.blob_store import BlobStore
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class QuorumNotReached(RuntimeError):
@@ -28,10 +34,14 @@ class ReplicationClient:
         settings: Settings,
         blob_store: BlobStore,
         channels: ChannelPool | None = None,
+        membership: Membership | None = None,
     ) -> None:
         self._settings = settings
         self._blob_store = blob_store
         self._channels = channels or ChannelPool()
+        # Optional so a client can run without failure detection; without it
+        # every peer is treated as alive.
+        self._membership = membership
         self._log = structlog.get_logger(__name__, node_id=settings.node_id)
 
     def put_blob(self, content: bytes) -> str:
@@ -63,14 +73,21 @@ class ReplicationClient:
         # the replicas still in flight, which is Phase 4's anti-entropy. Doing it
         # now would mean accepting writes that nothing ever completes, so a blob
         # could sit below R replicas forever with nothing noticing.
+        #
+        # Replicas declared dead are held back: attempting them costs a full RPC
+        # timeout each and usually ends as a missing acknowledgement anyway. They
+        # are tried only if the others cannot reach W, because a death can be
+        # stale — right after a partition heals, membership lags the network by
+        # a few gossip ticks, and refusing the write then would turn a recovered
+        # cluster into 503s. A replica skipped this way gets the blob from
+        # anti-entropy's blob catch-up once it is back.
         remotes = [n for n in replicas if n != self._settings.node_id]
-        if remotes:
-            with ThreadPoolExecutor(max_workers=len(remotes)) as pool:
-                results = pool.map(
-                    lambda node_id: self._put_remote(node_id, content, content_hash),
-                    remotes,
-                )
-                acknowledged += sum(1 for succeeded in results if succeeded)
+        presumed_dead = [n for n in remotes if self._is_dead(n)]
+        acknowledged += self._put_remotes(
+            [n for n in remotes if n not in presumed_dead], content, content_hash
+        )
+        if acknowledged < required:
+            acknowledged += self._put_remotes(presumed_dead, content, content_hash)
 
         if acknowledged < required:
             self._log.warning(
@@ -111,16 +128,38 @@ class ReplicationClient:
 
         # HRW order doubles as a preference order: every node tries the replicas
         # in the same sequence, so reads concentrate on the same node and benefit
-        # from its page cache.
-        for node_id in replica_set(
+        # from its page cache. Replicas declared dead go last rather than being
+        # skipped: a death can be false, and a slow read beats a 503 when the
+        # "dead" node is the only one holding the blob.
+        replicas = replica_set(
             content_hash, self._settings.node_ids, self._settings.replication_factor
-        ):
+        )
+        for node_id in sorted(replicas, key=self._is_dead):
             if node_id == self._settings.node_id:
                 continue
             content = self._get_remote(node_id, content_hash)
             if content is not None:
                 return content
         return None
+
+    def _put_remotes(
+        self, node_ids: list[str], content: bytes, content_hash: str
+    ) -> int:
+        """Write to these replicas in parallel; return how many acknowledged."""
+        if not node_ids:
+            return 0
+        with ThreadPoolExecutor(max_workers=len(node_ids)) as pool:
+            results = pool.map(
+                lambda node_id: self._put_remote(node_id, content, content_hash),
+                node_ids,
+            )
+            return sum(1 for succeeded in results if succeeded)
+
+    def _is_dead(self, node_id: str) -> bool:
+        return (
+            self._membership is not None
+            and self._membership.state_of(node_id, _utcnow()) is NodeState.DEAD
+        )
 
     def _put_remote(self, node_id: str, content: bytes, content_hash: str) -> bool:
         address = self._settings.peer_address(node_id)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from almacen.cluster import metadata_replicator
+from almacen.cluster import metadata_replicator, replication_client
 from almacen.domain import file_record
 from almacen.rpc import cluster_servicer
 from tests.chaos.cluster import ChaosCluster, ClusterConfig, VirtualClock
@@ -43,8 +43,9 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> VirtualClock:
     clock = VirtualClock()
     monkeypatch.setattr(file_record, "_utcnow", clock.now)
     monkeypatch.setattr(cluster_servicer, "_utcnow", clock.now)
-    # The metadata replicator consults membership, whose timestamps are virtual.
+    # The cluster clients consult membership, whose timestamps are virtual.
     monkeypatch.setattr(metadata_replicator, "_utcnow", clock.now)
+    monkeypatch.setattr(replication_client, "_utcnow", clock.now)
     return clock
 
 

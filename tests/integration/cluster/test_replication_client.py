@@ -1,11 +1,13 @@
 import hashlib
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from almacen.cluster.channels import ChannelPool
+from almacen.cluster.membership import Membership
 from almacen.cluster.placement import replica_set
 from almacen.cluster.replication_client import QuorumNotReached, ReplicationClient
 from almacen.config import Peer, Settings
@@ -15,6 +17,7 @@ from almacen.storage.metadata_store import MetadataStore
 from tests.helpers import free_port
 
 NODE_COUNT = 5
+SUSPICION_TIMEOUT = timedelta(seconds=60)
 
 
 @dataclass
@@ -52,7 +55,17 @@ def cluster(tmp_path: Path) -> Iterator[tuple[list[FakeNode], tuple[Peer, ...]]]
 
 
 @pytest.fixture
-def client_on(cluster, tmp_path: Path):
+def declare_dead():
+    """Node ids that every client built by `client_on` sees as dead.
+
+    Fill it before building the client: each client gets its own Membership,
+    seeded from this set at construction.
+    """
+    return set()
+
+
+@pytest.fixture
+def client_on(cluster, tmp_path: Path, declare_dead: set[str]):
     """Build a ReplicationClient that coordinates from a chosen node.
 
     The channel pool is owned by the fixture and closed on teardown, so channels
@@ -70,8 +83,17 @@ def client_on(cluster, tmp_path: Path):
             replication_factor=3,
             write_quorum=2,
         )
+        membership = Membership(
+            node_id=node_id,
+            peers=tuple(p.node_id for p in peers),
+            suspicion_timeout=SUSPICION_TIMEOUT,
+        )
+        # Suspected long enough ago that the suspicion has aged into death.
+        long_ago = datetime.now(timezone.utc) - 2 * SUSPICION_TIMEOUT
+        for dead in declare_dead:
+            membership.record_unreachable(dead, long_ago)
         local = next(n for n in nodes if n.node_id == node_id)
-        return ReplicationClient(settings, local.blob_store, channels)
+        return ReplicationClient(settings, local.blob_store, channels, membership)
 
     yield build
     channels.close()
@@ -276,3 +298,71 @@ def test_get_blob_rejects_a_corrupted_local_copy(cluster, client_on):
     client = client_on(holder_id)
 
     assert client.get_blob(bogus_hash) is None
+
+
+def test_put_blob_does_not_contact_a_replica_declared_dead(
+    cluster, client_on, declare_dead
+):
+    """A replica the failure detector has given up on costs no RPC timeout.
+
+    It counts as a missing acknowledgement, exactly as if the RPC had timed
+    out; the blob reaches it later through anti-entropy's blob catch-up.
+    """
+    nodes, peers = cluster
+    content = b"one replica is dead"
+    content_hash = hashlib.sha256(content).hexdigest()
+    doomed_id = _remote_replicas(content_hash, peers, "node1")[-1]
+    declare_dead.add(doomed_id)
+
+    client_on("node1").put_blob(content)  # W=2 is still met
+
+    doomed = next(n for n in nodes if n.node_id == doomed_id)
+    assert not doomed.blob_store.exists(content_hash), (
+        "the dead replica's server is up only to prove that nothing was sent"
+    )
+
+
+def test_put_blob_falls_back_to_dead_replicas_when_quorum_needs_them(
+    cluster, client_on, declare_dead
+):
+    """A stale death must not refuse a write the network could take.
+
+    Right after a partition heals, membership still reports the far side dead
+    for a few gossip ticks. Here every remote replica is declared dead but is
+    in fact up, so the write must still reach them and meet W.
+    """
+    nodes, peers = cluster
+    content = b"the dead are back"
+    content_hash = hashlib.sha256(content).hexdigest()
+    remotes = _remote_replicas(content_hash, peers, "node1")
+    declare_dead.update(remotes)
+
+    client_on("node1").put_blob(content)  # must not raise
+
+    for node_id in remotes:
+        assert next(n for n in nodes if n.node_id == node_id).blob_store.exists(
+            content_hash
+        )
+
+
+def test_get_blob_still_reads_from_a_replica_declared_dead(
+    cluster, client_on, declare_dead
+):
+    """Reads try dead replicas last, but do try them.
+
+    A false death is possible, and skipping the only holder of a blob would turn
+    a slow read into a 503.
+    """
+    nodes, peers = cluster
+    node_ids = [p.node_id for p in peers]
+    content = b"only on a dead-looking node"
+    content_hash = hashlib.sha256(content).hexdigest()
+    holder_id = replica_set(content_hash, node_ids, r=3)[0]
+    next(n for n in nodes if n.node_id == holder_id).blob_store.put(content)
+    declare_dead.add(holder_id)
+
+    reader_id = next(
+        n for n in node_ids if n not in replica_set(content_hash, node_ids, r=3)
+    )
+
+    assert client_on(reader_id).get_blob(content_hash) == content

@@ -94,8 +94,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.channels = channels
     app.state.blob_store = blob_store
     app.state.local_metadata_store = local_metadata_store
-    # One Membership instance, shared by the servicer, the loop and the
-    # metadata replicator. Two would each hold half the picture and neither would
+    # One Membership instance, shared by the servicer, the loop and both
+    # cluster clients. Two would each hold half the picture and neither would
     # see the other's observations.
     membership = Membership(
         node_id=settings.node_id,
@@ -103,7 +103,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         suspicion_timeout=timedelta(seconds=settings.suspicion_timeout_seconds),
     )
     app.state.membership = membership
-    app.state.replication_client = ReplicationClient(settings, blob_store, channels)
+    app.state.replication_client = ReplicationClient(
+        settings, blob_store, channels, membership
+    )
     app.state.metadata_store = ReplicatedMetadataStore(
         local_metadata_store, MetadataReplicator(settings, channels, membership)
     )
