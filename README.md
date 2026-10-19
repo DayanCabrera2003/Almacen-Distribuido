@@ -73,12 +73,10 @@ budget.
 > undone. Keep `ALMACEN_GRACE_TTL_SECONDS` above the longest partition the
 > deployment must survive; the 24h default exists for that reason.
 
-Still missing: OR-Set remove entries for tags are never pruned (safe pruning
+Known limitation: OR-Set remove entries for tags are never pruned, so a
+record's tag state grows with every tag ever removed from it. Pruning safely
 needs every node to have observed the removal, which this design does not
-track). Of Phase 6, `GET /cluster/status` and structured logging (see
-[Observability](#observability)) and the [command-line
-client](#command-line-client) and the seeded [chaos tests](#chaos-tests) are
-in place.
+track.
 
 ### Upgrading from Phase 2
 
