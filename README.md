@@ -47,7 +47,7 @@ the partition heals, rather than being lost forever.
 Content and metadata therefore have different guarantees. An acknowledged
 upload is on disk (flushed with `fsync`) on at least two replicas; an
 acknowledged metadata write is flushed to the accepting node's disk and pushed
-to every reachable peer, with no quorum. Because content is always written to
+to every peer not declared dead, with no quorum. Because content is always written to
 quorum before its record, metadata never points at content that was not stored
 durably; while the two are out of step on a node, a client may see an older
 version of a file, a `404` for one not yet known there, or a `503` for one whose
