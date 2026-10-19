@@ -47,7 +47,7 @@ the partition heals, rather than being lost forever.
 Content and metadata therefore have different guarantees. An acknowledged
 upload is on disk (flushed with `fsync`) on at least two replicas; an
 acknowledged metadata write is flushed to the accepting node's disk and pushed
-to every reachable peer, with no quorum. Because content is always written to
+to every peer not declared dead, with no quorum. Because content is always written to
 quorum before its record, metadata never points at content that was not stored
 durably; while the two are out of step on a node, a client may see an older
 version of a file, a `404` for one not yet known there, or a `503` for one whose
@@ -73,12 +73,10 @@ budget.
 > undone. Keep `ALMACEN_GRACE_TTL_SECONDS` above the longest partition the
 > deployment must survive; the 24h default exists for that reason.
 
-Still missing: OR-Set remove entries for tags are never pruned (safe pruning
+Known limitation: OR-Set remove entries for tags are never pruned, so a
+record's tag state grows with every tag ever removed from it. Pruning safely
 needs every node to have observed the removal, which this design does not
-track). Of Phase 6, `GET /cluster/status` and structured logging (see
-[Observability](#observability)) and the [command-line
-client](#command-line-client) and the seeded [chaos tests](#chaos-tests) are
-in place.
+track.
 
 ### Upgrading from Phase 2
 
@@ -186,6 +184,55 @@ node2 answers `200` throughout. node5 answers `000` while partitioned — not
 entirely, so its published port stops answering too, and curl cannot connect at
 all. After healing it answers `200`, having learned both the record and the
 content through gossip.
+
+### Demonstrating concurrent writes on both sides of a partition
+
+The demo above writes on one side only. To show two sides diverging and then
+being reconciled, write on the isolated node too. Its published port is gone
+while it is disconnected, so reach its API from inside its own container, where
+`127.0.0.1:8000` still answers. Continuing with `FILE_ID` from above:
+
+    docker network disconnect almacen-net node5
+
+    # Wait until node5 has declared every peer dead (about 20s with the demo
+    # settings); until then each of its writes still tries them and can take up
+    # to one RPC timeout.
+    until docker exec node5 python -c "import httpx, sys; sys.exit(any(
+      m['state'] != 'dead' for m in httpx.get('http://127.0.0.1:8000/cluster/status')
+      .json()['members'] if not m['is_self']))"; do sleep 1; done
+
+    # Majority side: add a tag, remove one.
+    curl -s -X POST -H 'content-type: application/json' \
+      -d '{"tags":["majority"]}' http://127.0.0.1:8001/files/$FILE_ID/tags
+    curl -s -X DELETE http://127.0.0.1:8001/files/$FILE_ID/tags/partitioned
+
+    # Isolated side: add a tag, and re-add the one the majority just removed.
+    docker exec node5 python -c "import httpx; print(httpx.post(
+      'http://127.0.0.1:8000/files/$FILE_ID/tags',
+      json={'tags': ['minority', 'partitioned']}, timeout=30).text)"
+
+    # An upload on the isolated side cannot reach its write quorum.
+    docker exec node5 python -c "import httpx; print(httpx.post(
+      'http://127.0.0.1:8000/files', files={'file': ('x.txt', b'isolated')},
+      data={'name': 'x.txt'}, timeout=30).status_code)"
+
+    docker network connect almacen-net node5
+    sleep 10
+    for i in 1 5; do curl -s http://127.0.0.1:800$i/files/$FILE_ID/metadata; echo; done
+
+Both nodes end with the same tags — `majority`, `minority` and `partitioned`.
+Tags are an observed-remove set: the majority's removal only removes the
+`partitioned` it had observed, and node5's re-add is a new, unobserved one, so
+it survives (add wins over a concurrent remove). Names and tombstones are
+last-writer-wins instead, so a concurrent rename on each side converges on one
+of the two names on every node.
+
+Metadata writes succeed on the isolated node; uploads do not. An upload needs
+W=2 replicas and node5 alone can store at most one, so it answers `503` — the
+asymmetry between metadata and content described under Status. The `503` takes
+one RPC timeout: with too few live replicas a node still tries the ones it
+believes dead, because right after a heal that belief is stale and the write
+would otherwise be refused for nothing.
 
 ### Demonstrating deletion and garbage collection
 

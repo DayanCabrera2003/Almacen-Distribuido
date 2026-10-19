@@ -94,21 +94,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.channels = channels
     app.state.blob_store = blob_store
     app.state.local_metadata_store = local_metadata_store
-    app.state.replication_client = ReplicationClient(settings, blob_store, channels)
-    app.state.metadata_store = ReplicatedMetadataStore(
-        local_metadata_store, MetadataReplicator(settings, channels)
-    )
-    # Queries read the local replica directly; there is nothing to replicate.
-    app.state.tag_index = TagIndex(local_metadata_store)
-
-    # One Membership instance, shared by the servicer and the loop. Two would
-    # each hold half the picture and neither would see the other's observations.
+    # One Membership instance, shared by the servicer, the loop and both
+    # cluster clients. Two would each hold half the picture and neither would
+    # see the other's observations.
     membership = Membership(
         node_id=settings.node_id,
         peers=tuple(settings.node_ids),
         suspicion_timeout=timedelta(seconds=settings.suspicion_timeout_seconds),
     )
     app.state.membership = membership
+    app.state.replication_client = ReplicationClient(
+        settings, blob_store, channels, membership
+    )
+    app.state.metadata_store = ReplicatedMetadataStore(
+        local_metadata_store, MetadataReplicator(settings, channels, membership)
+    )
+    # Queries read the local replica directly; there is nothing to replicate.
+    app.state.tag_index = TagIndex(local_metadata_store)
+
     # Disabled by a non-positive interval. That is what keeps the test suite's
     # multi-node fixtures from starting real gossip threads on a real clock.
     # Garbage collection runs on the same loop, so it is disabled with it.

@@ -281,12 +281,23 @@ Step by step (`almacen/api/routers/files.py`,
    the quorum. Dynamo acknowledges as soon as the W-th ack arrives; waiting for
    all of them is slower but means a replica that was reachable always gets the
    blob, rather than leaving it to anti-entropy.
+   Replicas the failure detector has declared dead (section 10) are held back
+   and tried only if the others cannot reach W: attempting them would cost a
+   full RPC timeout on every upload while a node is down. They are not skipped
+   outright because a death can be stale — right after a partition heals,
+   membership lags the network by a few gossip ticks — and refusing the write
+   then would turn a recovered cluster into 503s. A replica held back this way
+   receives the blob through anti-entropy's blob catch-up.
 3. If at least `min(W, |replica set|)` replicas stored the blob, the write is
    durable enough. The `min` makes a single-node development deployment work.
 4. Only then is the `FileRecord` created and committed to the local SQLite
-   store, and pushed to every peer with `ReplicateRecord`. The push is
-   synchronous but **best effort**: a peer that cannot be reached does not fail
-   the request; anti-entropy will deliver the record later.
+   store, and pushed to every peer not declared dead with `ReplicateRecord`.
+   The push is synchronous but **best effort**: a peer that cannot be reached
+   does not fail the request; anti-entropy will deliver the record later.
+   Skipping dead peers is what keeps a write from waiting out
+   `ALMACEN_RPC_TIMEOUT_SECONDS` on each of them; a peer that is merely
+   suspect is still pushed to, so during the suspicion window a write can
+   still take up to one RPC timeout.
 5. If the quorum is not reached the client gets `503` and **no metadata is
    written**, so no record can ever point at content that was not stored
    durably. Replicas that did accept the blob keep an unreferenced copy, which
@@ -336,8 +347,9 @@ is the record's `content_hash` repointed.
   purges). A request without tags still lists every live file.
 - **Download** (`GET /files/{id}`) reads the record locally (404 if unknown or
   tombstoned), then fetches the blob: from local disk if this node holds it,
-  otherwise from the replicas in HRW order, stopping at the first one that
-  answers with bytes matching the hash. A corrupt copy — local or remote — is
+  otherwise from the replicas in HRW order — those declared dead moved to the
+  end rather than skipped, since a death can be false — stopping at the first
+  one that answers with bytes matching the hash. A corrupt copy — local or remote — is
   treated as a miss and the next replica is tried. If no replica can serve it
   the client gets `503`: the file exists, its bytes are temporarily
   unreachable.
@@ -667,12 +679,13 @@ incarnation, dissemination by gossip) without SWIM's indirect probes.
 - **Local clocks only.** A received state is re-stamped with the receiver's
   clock, so suspicion deadlines never depend on another machine's clock.
 
-The view is used for one thing: choosing gossip partners — each round picks up
-to `ALMACEN_GOSSIP_FANOUT` random peers that are not dead. It does **not**
-change placement (section 6) or the replica set of a write: membership is
-static (`ALMACEN_PEERS`), and the failure detector exists to avoid wasting
-rounds on dead peers and to make the cluster's view of itself observable
-(`GET /cluster/status`, section 15).
+The view is used to avoid waiting on peers that are gone: each gossip round
+picks up to `ALMACEN_GOSSIP_FANOUT` random peers that are not dead, a metadata
+push skips dead peers, and a blob write tries dead replicas only when the live
+ones cannot reach W (section 7). It does **not** change placement (section 6)
+or the replica set of a write: membership is static (`ALMACEN_PEERS`), and the
+failure detector exists to avoid wasting time on dead peers and to make the
+cluster's view of itself observable (`GET /cluster/status`, section 15).
 
 Like any failure detector in an asynchronous system it can be wrong — a slow
 node is indistinguishable from a dead one — and it is designed to be wrong only
@@ -741,8 +754,9 @@ time ─────────────────────────
  upload F on node1:                                  │ node5 gossips, receives
    blob -> its replicas among 1-4;                   │ F's record (and the tag),
    if node5 is a replica, its PutBlob fails          │ merges by CRDT; if it is
-   but W=2 is still met -> 201                       │ a replica for F's blob,
- record pushed to 2,3,4; push to 5 fails             │ catch-up fetches it.
+   (or, once node5 is dead, is not attempted)        │ a replica for F's blob,
+   but W=2 is still met -> 201                       │ catch-up fetches it.
+ record pushed to 2,3,4; push to 5 fails             │
  node5: tags F's sibling G while isolated ───────────┤ node5's edit to G reaches
    (local write, succeeds)                           │ the others the same way.
  node5 suspected, then dead in others' views         │ first successful contact:

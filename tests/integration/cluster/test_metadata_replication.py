@@ -1,7 +1,9 @@
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from almacen.cluster.membership import Membership
 from almacen.cluster.metadata_replicator import MetadataReplicator
 from almacen.cluster.replicated_metadata_store import ReplicatedMetadataStore
 from almacen.config import Peer, Settings
@@ -12,10 +14,21 @@ from almacen.storage.metadata_store import MetadataStore
 from tests.helpers import free_port
 
 NODE_COUNT = 3
+SUSPICION_TIMEOUT = timedelta(seconds=60)
 
 
 @pytest.fixture
-def three_nodes(tmp_path: Path):
+def membership() -> Membership:
+    """node1's view of the cluster; every peer starts alive."""
+    return Membership(
+        node_id="node1",
+        peers=tuple(f"node{i}" for i in range(1, NODE_COUNT + 1)),
+        suspicion_timeout=SUSPICION_TIMEOUT,
+    )
+
+
+@pytest.fixture
+def three_nodes(tmp_path: Path, membership: Membership):
     """Three real nodes; index 0 is the coordinator under test."""
     stores: list[MetadataStore] = []
     servers = []
@@ -42,7 +55,7 @@ def three_nodes(tmp_path: Path):
         node_id="node1",
         peers=tuple(peers),
     )
-    replicator = MetadataReplicator(settings)
+    replicator = MetadataReplicator(settings, membership=membership)
     replicated = ReplicatedMetadataStore(stores[0], replicator)
 
     yield replicated, stores, servers
@@ -100,6 +113,40 @@ def test_a_dead_peer_does_not_fail_the_write(three_nodes):
     # The reachable nodes have it; node3's divergence is Phase 4's problem.
     assert stores[0].get(record.file_id) is not None
     assert stores[1].get(record.file_id) is not None
+
+
+def test_a_peer_declared_dead_is_not_pushed_to(three_nodes, membership):
+    """A write must not wait on a peer the failure detector has given up on.
+
+    Pushing to it anyway costs a full RPC timeout per write for as long as the
+    peer is down or partitioned away, on every write. Anti-entropy delivers the
+    record once the peer is back, so skipping it loses nothing.
+    """
+    replicated, stores, _ = three_nodes
+    # Suspected long enough ago that the suspicion has aged into death.
+    membership.record_unreachable(
+        "node3", datetime.now(timezone.utc) - 2 * SUSPICION_TIMEOUT
+    )
+
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
+    replicated.insert(record)
+
+    assert stores[1].get(record.file_id) is not None
+    assert stores[2].get(record.file_id) is None, (
+        "node3 is declared dead, so the push must skip it — its server is up "
+        "only to prove that nothing was sent"
+    )
+
+
+def test_a_suspect_peer_is_still_pushed_to(three_nodes, membership):
+    # Suspicion is not death: one failed probe is as often a dropped packet.
+    replicated, stores, _ = three_nodes
+    membership.record_unreachable("node3", datetime.now(timezone.utc))
+
+    record = FileRecord.new(name="a.txt", content_hash="h1", node_id="node1")
+    replicated.insert(record)
+
+    assert stores[2].get(record.file_id) is not None
 
 
 def test_reads_are_served_locally(three_nodes):
