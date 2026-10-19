@@ -120,7 +120,24 @@ Disconnecting a container from the network isolates it from every peer:
     # ... write to other nodes; node5 cannot see them ...
     docker network connect almacen-net node5
 
-The README walks through the full partition-and-heal demo.
+Disconnecting also takes away the node's published port: while node5 is cut
+off, `http://127.0.0.1:8005` does not answer at all (curl reports `000`). To
+write on the isolated side — the way to show both sides diverging and then
+being reconciled — call its API from inside the container, where
+`127.0.0.1:8000` still answers:
+
+    docker exec node5 python -c "import httpx; print(httpx.get('http://127.0.0.1:8000/cluster/status').text)"
+
+Until node5 has declared its peers dead it still tries them, so a write there
+can take up to one RPC timeout (5 s). Detection on the isolated side takes
+about 20 s with the settings above, because each gossip probe of an
+unreachable peer itself waits out an RPC timeout; `/cluster/status` shows when
+it is done. From then on node5's metadata writes return at once. The connected
+side is unaffected: once it has declared node5 dead, its writes stop waiting on
+node5.
+
+The README walks through the full partition-and-heal demo, including
+concurrent writes on both sides.
 
 ## 7. Watch a delete being garbage-collected
 
